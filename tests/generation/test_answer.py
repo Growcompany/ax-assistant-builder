@@ -195,8 +195,43 @@ def test_out_of_range_markers_are_removed_and_groups_renumbered(retriever, reply
 
 
 @pytest.mark.parametrize(
+    ("reply", "text", "ids"),
+    [
+        # 범위 밖 표시 바로 뒤에 글자가 붙으면 인용 표시가 아니라 본문의 일부일 수 있다
+        ("만기 [30]일 전에 [1] 알립니다.", "만기 [30]일 전에 [1] 알립니다.", [c1.chunk_id]),
+        ("지침은 [9]을 따릅니다 [2].", "지침은 [9]을 따릅니다 [1].", [c2.chunk_id]),
+        ("가 [0]번, 나 [9, 10]개 [9] [2].", "가 [0]번, 나 [9, 10]개 [1].", [c2.chunk_id]),
+    ],
+)
+def test_out_of_range_marker_followed_by_letter_is_kept(retriever, reply, text, ids):
+    a = answer("q", retriever, FakeLLM(reply), ws, "상담원")
+    assert a.text == text and cited_ids(a) == ids
+    # 남겨 둔 표시의 번호는 모두 1..len(citations) 밖이라 인용 번호와 섞이지 않는다
+    for group in re.findall(r"\[([\d, ]+)\]", a.text):
+        in_range = [1 <= int(n) <= len(a.citations) for n in group.split(",")]
+        assert all(in_range) or not any(in_range)
+
+
+@pytest.fixture
+def retriever5() -> FixedRetriever:
+    extra = [c1.model_copy(update={"chunk_id": f"d::000{i}"}) for i in (3, 4)]
+    return FixedRetriever([c1, c2, c3, *extra])
+
+
+@pytest.mark.parametrize("marker", ["[０]", "[٠]", "[１]", "[００１]", "[٣]"])
+def test_non_ascii_digits_are_not_citation_numbers(retriever5, marker):
+    # 인용 번호는 ASCII 숫자만 받는다. 정규식의 \d는 전각 '０'·아라비아 '٠'도 받아서
+    # int('０') == 0 → retrieved[-1]처럼 모델이 쓰지 않은 청크가 인용될 수 있었다
+    reply = f"내용 {marker}. 근거 [2]."
+    a = answer("q", retriever5, FakeLLM(reply), ws, "상담원")
+    assert cited_ids(a) == [c2.chunk_id]
+    assert a.text == f"내용 {marker}. 근거 [1]."
+
+
+@pytest.mark.parametrize(
     "huge",
-    # 파이썬 3.11+은 4300자리가 넘는 문자열을 int()로 바꾸면 ValueError를 낸다
+    # int()는 기본으로 4300자리가 넘는 10진 문자열을 ValueError로 거부한다(CVE-2020-10735 대응,
+    # 3.11부터와 3.10.7 등 보안 릴리스)
     ["1" * 5000, "9" * 5000, "0" * 4999 + "1" * 5000],
 )
 def test_huge_citation_number_is_out_of_range(retriever, huge):
@@ -238,6 +273,12 @@ def test_citation_carries_location_fields(retriever):
         f"{REFUSAL_TEXT} [1]에는 신용카드 연회비 정보가 없습니다.",  # 이유에 자료 번호가 나옴
         "   \n",
         "[9]",  # 범위 밖 번호를 지우면 아무 내용도 없다
+        # 인용 표시와 문장부호뿐인 응답: 글자·숫자가 하나도 없으면 내용이 없다
+        "[9].",
+        "[1].",
+        "[1, 2]。",
+        ".",
+        "…",
     ],
 )
 def test_refusal_variants(retriever, reply):

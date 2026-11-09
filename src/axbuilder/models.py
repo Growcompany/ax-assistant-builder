@@ -69,7 +69,7 @@ class Citation(BaseModel):
 
 
 class Answer(BaseModel):
-    text: str  # 본문의 [i]는 citations[i-1]을 가리킨다 (자료 번호에서 다시 매김)
+    text: str  # 본문의 [i]는 1 ≤ i ≤ len(citations)이면 citations[i-1] (자료 번호에서 다시 매김)
     citations: list[Citation]  # 본문에 처음 나온 순서, 같은 청크는 한 번
     refused: bool
     retrieved: list[ScoredChunk]  # 프롬프트에 넣은 청크 (번호 = 순서 + 1). 평가가 검색 지표에 쓴다
