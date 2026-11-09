@@ -1,3 +1,5 @@
+import inspect
+
 import pytest
 
 from axbuilder.models import Chunk, ScoredChunk
@@ -176,6 +178,14 @@ def test_hybrid_fetches_at_least_k_candidates():
     assert bm25.calls == [("예금", 3, None)]
 
 
+def test_hybrid_tie_puts_bm25_result_first():
+    # 같은 순위 조합이면 동점이다. 그때는 BM25 쪽 청크가 앞선다(rankings = [bm25, dense] 순서)
+    hybrid = HybridRetriever(RecordingRetriever([a]), RecordingRetriever([b]))
+    assert ids(hybrid.search("q", k=2)) == [a.chunk.chunk_id, b.chunk.chunk_id]
+    hybrid = HybridRetriever(RecordingRetriever([b]), RecordingRetriever([a]))
+    assert ids(hybrid.search("q", k=2)) == [b.chunk.chunk_id, a.chunk.chunk_id]
+
+
 def test_hybrid_works_when_dense_empty():
     hybrid = HybridRetriever(RecordingRetriever([a, b]), RecordingRetriever([]))
     assert ids(hybrid.search("예금", k=5)) == [a.chunk.chunk_id, b.chunk.chunk_id]
@@ -218,3 +228,15 @@ def test_all_retrievers_share_search_shape(hybrid):
         results = retriever.search("예금 금리", k=2, access_levels=["public"])
         assert 0 < len(results) <= 2
         assert all(isinstance(r, ScoredChunk) for r in results)
+
+
+@pytest.mark.parametrize("cls", [BM25Index, DenseIndex, HybridRetriever])
+def test_search_signature_matches_retriever_protocol(cls):
+    # CI에 타입 검사기가 없어 Protocol 주석만으로는 매개변수 이름·순서가 검사되지 않는다.
+    # 기본값은 다를 수 있다(계획: BM25·dense는 k=10, Retriever는 k=5)
+    def shape(func):
+        params = inspect.signature(func).parameters.values()
+        return [(p.name, p.kind, p.default is inspect.Parameter.empty) for p in params]
+
+    assert shape(cls.search) == shape(Retriever.search)
+    assert inspect.signature(cls.search).parameters["access_levels"].default is None

@@ -7,7 +7,9 @@ from axbuilder.models import Chunk, ScoredChunk
 from axbuilder.retrieval.bm25 import BM25Index
 from axbuilder.retrieval.dense import DenseIndex
 
-RRF_K = 60  # Cormack et al.(2009)의 값. Qdrant 내장 RRF의 기본값은 2라서 쓸 때 명시해야 한다
+# Cormack et al.(2009)의 값. Qdrant 내장 RRF는 순위를 0부터 세고(1/(k + 순위 - 1)) 기본값이
+# 2라서, Qdrant로 같은 점수를 내려면 Rrf(k=61)을 줘야 한다
+RRF_K = 60
 
 
 class Retriever(Protocol):
@@ -40,8 +42,9 @@ def rrf_fuse(
             first.setdefault(chunk_id, item.chunk)
             terms.setdefault(chunk_id, []).append(1 / (k + rank))
 
-    # fsum은 더하는 순서와 무관하게 같은 값을 내서, 같은 순위 조합이면 정확히 동점이 된다.
-    # sorted는 안정 정렬이라 동점은 처음 나온 순서(앞 목록 = BM25 먼저)로 고정된다
+    # 목록이 2개면 +도 순서와 무관하다(교환법칙). 3개 이상이면 더하는 순서에 따라 마지막 자리가
+    # 달라질 수 있어서, 정확히 반올림한 합을 내는 fsum으로 같은 순위 조합이면 늘 정확히 동점이
+    # 되게 한다. sorted는 안정 정렬이라 동점은 처음 나온 순서(앞 목록 = BM25 먼저)로 고정된다
     fused = sorted(
         (ScoredChunk(chunk=first[cid], score=math.fsum(ts)) for cid, ts in terms.items()),
         key=lambda s: -s.score,
