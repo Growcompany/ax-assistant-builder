@@ -59,7 +59,7 @@ class LLMResponse(BaseModel):
 
 
 class Citation(BaseModel):
-    """답변이 근거로 든 청크의 위치. [n] 번호를 검색 결과 n번째 청크로 바꾼 것."""
+    """답변이 근거로 든 청크의 위치. LLM이 쓴 자료 번호 [n]을 검색 결과 n번째 청크로 바꾼 것."""
 
     chunk_id: str
     doc_id: str
@@ -69,8 +69,8 @@ class Citation(BaseModel):
 
 
 class Answer(BaseModel):
-    text: str
-    citations: list[Citation]
+    text: str  # 본문의 [i]는 citations[i-1]을 가리킨다 (자료 번호에서 다시 매김)
+    citations: list[Citation]  # 본문에 처음 나온 순서, 같은 청크는 한 번
     refused: bool
     retrieved: list[ScoredChunk]  # 프롬프트에 넣은 청크 (번호 = 순서 + 1). 평가가 검색 지표에 쓴다
     llm: LLMResponse | None  # 원문 응답. 검색 결과가 없어 LLM을 부르지 않았으면 None

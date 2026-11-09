@@ -1,7 +1,9 @@
+import re
+
 import pytest
 
 from axbuilder.generation.answer import REFUSAL_TEXT, answer, build_prompt
-from axbuilder.generation.llm import FakeLLM, LLMResponse
+from axbuilder.generation.llm import FakeLLM, LLMResponse, LLMUnavailableError
 from axbuilder.models import Answer, Chunk, Citation, ScoredChunk
 from axbuilder.workspace import Workspace
 
@@ -121,22 +123,86 @@ def test_unknown_role_raises(retriever):
 
 def test_ignores_zero_citation(retriever):
     a = answer("q", retriever, FakeLLM("내용 [0] [2]."), ws, "상담원")
-    assert cited_ids(a) == [c2.chunk_id]
+    assert cited_ids(a) == [c2.chunk_id] and a.text == "내용 [1]."
 
 
 def test_only_out_of_range_citations_gives_no_citations(retriever):
     a = answer("q", retriever, FakeLLM("내용 [9]."), ws, "상담원")
-    assert a.citations == [] and a.refused is False
+    assert a.citations == [] and a.refused is False and a.text == "내용."
 
 
 def test_duplicate_citation_counted_once_in_order_of_appearance(retriever):
     a = answer("q", retriever, FakeLLM("가 [2]. 나 [1]. 다 [2][1]."), ws, "상담원")
     assert cited_ids(a) == [c2.chunk_id, c1.chunk_id]
+    assert a.text == "가 [1]. 나 [2]. 다 [1][2]."
 
 
 def test_comma_separated_citations(retriever):
     a = answer("q", retriever, FakeLLM("가 [1, 2]."), ws, "상담원")
+    assert cited_ids(a) == [c1.chunk_id, c2.chunk_id] and a.text == "가 [1, 2]."
+
+
+# --- 본문 인용 번호 다시 매기기: citations[i] <-> 본문 [i+1] ---
+# Task 10 /ask 응답에는 retrieved가 없어서, 본문 번호가 자료 번호 그대로면 클라이언트가
+# [4]가 어느 인용인지 알 수 없다
+
+
+@pytest.fixture
+def retriever3() -> FixedRetriever:
+    return FixedRetriever([c1, c2, c3])
+
+
+def test_renumbers_citations_in_order_of_first_appearance(retriever3):
+    raw = "금리는 2.80%입니다 [2]. 지침은 [3]을 따릅니다. 한도는 1억원입니다 [1]. 다시 [2]."
+    a = answer("q", retriever3, FakeLLM(raw), ws, "상담원")
+    assert cited_ids(a) == [c2.chunk_id, c3.chunk_id, c1.chunk_id]
+    assert (
+        a.text == "금리는 2.80%입니다 [1]. 지침은 [2]을 따릅니다. 한도는 1억원입니다 [3]. 다시 [1]."
+    )
+    assert a.llm is not None and a.llm.text == raw  # LLM 원문(자료 번호)은 그대로 남는다
+
+
+def test_every_body_number_points_to_the_cited_chunk(retriever3):
+    # 본문의 [n]이 가리키는 citations[n-1] = 원문의 같은 자리에서 자료 번호가 가리키던 청크
+    raw = "가 [3]. 나 [1, 3]. 다 [2][9]. 라 [3]."
+    a = answer("q", retriever3, FakeLLM(raw), ws, "상담원")
+    by_prompt_number = {"1": c1.chunk_id, "2": c2.chunk_id, "3": c3.chunk_id}
+    expected = [
+        [by_prompt_number[n.strip()] for n in group.split(",") if n.strip() in by_prompt_number]
+        for group in re.findall(r"\[([\d, ]+)\]", raw)
+    ]
+    got = [
+        [a.citations[int(n) - 1].chunk_id for n in group.split(",")]
+        for group in re.findall(r"\[([\d, ]+)\]", a.text)
+    ]
+    assert got == [ids for ids in expected if ids]
+
+
+@pytest.mark.parametrize(
+    ("reply", "text"),
+    [
+        ("내용 [1][9].", "내용 [1]."),
+        ("한도는 1억원입니다 [9].", "한도는 1억원입니다."),
+        ("가 [0] 나 [1].", "가 나 [1]."),
+        ("[9] 가 [2].", "가 [1]."),
+        ("가 [1, 9]. 나 [9, 10].", "가 [1]. 나."),
+        ("가 [2, 1]. 나 [1,2]. 다 [1, 1].", "가 [1, 2]. 나 [2, 1]. 다 [2]."),
+    ],
+)
+def test_out_of_range_markers_are_removed_and_groups_renumbered(retriever, reply, text):
+    a = answer("q", retriever, FakeLLM(reply), ws, "상담원")
+    assert a.text == text and a.refused is False
+
+
+@pytest.mark.parametrize(
+    "huge",
+    # 파이썬 3.11+은 4300자리가 넘는 문자열을 int()로 바꾸면 ValueError를 낸다
+    ["1" * 5000, "9" * 5000, "0" * 4999 + "1" * 5000],
+)
+def test_huge_citation_number_is_out_of_range(retriever, huge):
+    a = answer("q", retriever, FakeLLM(f"내용 [1][{huge}]. 다음 [{huge}, 2]."), ws, "상담원")
     assert cited_ids(a) == [c1.chunk_id, c2.chunk_id]
+    assert a.text == "내용 [1]. 다음 [2]."
 
 
 def test_citation_carries_location_fields(retriever):
@@ -162,9 +228,16 @@ def test_citation_carries_location_fields(retriever):
         f"  {REFUSAL_TEXT}\n",
         f'"{REFUSAL_TEXT}"',
         f"**{REFUSAL_TEXT}**",
+        f"`{REFUSAL_TEXT}`",  # 백틱(인라인 코드)
+        f"**“{REFUSAL_TEXT}”**",
+        "제공된 자료로는 확인할 수 없습니다!",
+        "제공된 자료로는  확인할 수\n없습니다。",
         f"{REFUSAL_TEXT} [1]",  # 거절문에 붙은 인용은 근거가 아니다
+        f"[1] {REFUSAL_TEXT}",
         f"{REFUSAL_TEXT} 자료에는 신용카드 연회비 정보가 없습니다.",  # 이유를 덧붙인 거절
+        f"{REFUSAL_TEXT} [1]에는 신용카드 연회비 정보가 없습니다.",  # 이유에 자료 번호가 나옴
         "   \n",
+        "[9]",  # 범위 밖 번호를 지우면 아무 내용도 없다
     ],
 )
 def test_refusal_variants(retriever, reply):
@@ -172,16 +245,26 @@ def test_refusal_variants(retriever, reply):
     assert a.refused is True and a.citations == [] and a.text == REFUSAL_TEXT
 
 
-def test_answer_mentioning_refusal_phrase_later_is_not_refusal(retriever):
-    reply = f"일반 예금은 1억원까지 보호됩니다 [1]. 퇴직연금 한도는 {REFUSAL_TEXT}"
+@pytest.mark.parametrize(
+    "reply",
+    [
+        f"일반 예금은 1억원까지 보호됩니다 [1]. 퇴직연금 한도는 {REFUSAL_TEXT}",
+        f"일반 예금은 1억원까지 보호됩니다 [1].\n\n**{REFUSAL_TEXT}**",
+    ],
+)
+def test_answer_followed_by_refusal_phrase_is_not_refusal(retriever, reply):
+    # 앞에 실제 답이 있고 뒤에 거절 문구가 붙은 부분 답변은 답변이다
     a = answer("q", retriever, FakeLLM(reply), ws, "상담원")
     assert a.refused is False and cited_ids(a) == [c1.chunk_id] and a.text == reply
 
 
-def test_refusal_followed_by_cited_partial_answer_is_answer(retriever):
+def test_refusal_first_then_cited_partial_answer_is_refusal(retriever):
+    # 거절 문구로 시작하면 뒤에 인용 단 내용이 있어도 거절이다. "[1]에는 정보가 없습니다"처럼
+    # 거절 이유에 자료 번호가 나오는 경우와 규칙으로 가를 수 없어서다. 원문은 llm.text에 남는다
     reply = f"{REFUSAL_TEXT} 다만 일반 예금은 1억원까지 보호됩니다 [1]."
     a = answer("q", retriever, FakeLLM(reply), ws, "상담원")
-    assert a.refused is False and cited_ids(a) == [c1.chunk_id]
+    assert a.refused is True and a.citations == [] and a.text == REFUSAL_TEXT
+    assert a.llm is not None and a.llm.text == reply
 
 
 # --- 권한(역할) ---
@@ -232,6 +315,19 @@ def test_answer_sends_build_prompt_output_to_llm(retriever):
     llm = FakeLLM("x [1]")
     answer("보호 한도?", retriever, llm, ws, "상담원")
     assert llm.calls == [build_prompt("보호 한도?", retriever.results, ws)]
+
+
+class DownLLM:
+    """generate()가 LLMUnavailableError를 던지는 가짜 (Ollama 꺼짐, API 키 없음)."""
+
+    def generate(self, system: str, user: str, max_tokens: int = 2048) -> LLMResponse:
+        raise LLMUnavailableError("Ollama가 실행 중인지 확인하세요: ollama serve")
+
+
+def test_llm_unavailable_error_propagates(retriever):
+    # Review Focus #5: Task 10은 이 예외를 503으로 바꾼다. answer()가 거절로 삼키면 안 된다
+    with pytest.raises(LLMUnavailableError, match="ollama serve"):
+        answer("q", retriever, DownLLM(), ws, "상담원")
 
 
 # --- 프롬프트 ---
