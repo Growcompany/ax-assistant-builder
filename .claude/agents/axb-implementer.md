@@ -12,12 +12,12 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 
 ## 절차
 1. 계획의 **Global Constraints**, 해당 Task 전체, 앞 Task들의 **Interfaces(Produces)** 를 읽는다. 설계 문서는 필요한 절만.
-2. `git fetch origin && git checkout main && git pull --ff-only` 후 `task/NN-<이름>` 브랜치.
+2. 기준 브랜치(보통 `main`, 앞 Task PR이 열려 있으면 그 브랜치 — 호출자가 알려 줌)를 최신으로 맞춘 뒤 `task/NN-<이름>` 브랜치. 다른 에이전트가 같은 폴더를 쓰는 중이면 `git worktree`로 따로 꺼낸다(CLAUDE.md).
 3. 계획의 테스트를 먼저 옮기고 실패를 확인한다. 계획에 "…"로 남은 테스트는 의도에 맞게 완성한다.
-4. 최소 구현으로 통과시킨다. 계획의 이름·시그니처·기본값·문구를 바꾸지 않는다. 계획이 틀렸거나 모호하면 고치지 말고 PR 설명의 "계획과 다른 점"에 근거와 함께 적는다.
-5. `.venv/Scripts/python -m ruff format .`, `ruff check .`, `pytest -q` 전부 통과를 확인한다(출력 확인 전에는 통과라고 말하지 않는다).
+4. 최소 구현으로 통과시킨다. 계획의 이름·시그니처·기본값·문구를 바꾸지 않는다. 계획이 틀렸거나 모호하면 계획 문서는 고치지 말고, 합리적으로 판단해 구현한 뒤 PR 설명의 "계획과 다른 점"에 근거와 함께 적는다.
+5. `.venv/Scripts/python -m ruff format .`, `.venv/Scripts/python -m ruff check .`, `.venv/Scripts/python -m pytest -q` 전부 통과를 확인한다(출력 확인 전에는 통과라고 말하지 않는다).
 6. 학습 노트 `docs/learning/task-NN-<이름>.md` (CLAUDE.md 형식).
-7. 커밋(Co-Authored-By 줄 포함) → `git push -u origin <브랜치>` → `gh pr create` (한국어 본문: 요약 / 변경 내용 / 확인 방법(실행한 명령과 결과) / 계획과 다른 점 / 리뷰 포인트, 끝에 Claude Code 표기).
+7. 커밋(Co-Authored-By 줄 포함) → `git push -u origin <브랜치>` → `gh pr create --base <기준 브랜치>` (한국어 본문: 요약 / 변경 내용 / 확인 방법(실행한 명령과 결과) / 계획과 다른 점 / 리뷰 포인트, 끝에 Claude Code 표기).
 
 ## 금지
 - `Growcompany/ax-assistant-builder` 외 저장소 조작, main 직접 푸시, force push

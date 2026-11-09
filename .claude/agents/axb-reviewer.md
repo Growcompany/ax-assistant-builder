@@ -8,7 +8,7 @@ tools: Read, Grep, Glob, Bash
 
 ## 절차
 1. `gh pr view <번호>`, `gh pr diff <번호>`로 변경을 읽는다. 해당 Task와 Global Constraints, Review Focus를 계획에서 읽는다.
-2. PR 브랜치를 체크아웃해 `.venv/Scripts/python -m pytest -q`, `ruff check .`, `ruff format --check .`를 직접 돌린다. 끝나면 원래 브랜치로 돌아간다.
+2. 공유 폴더의 브랜치는 바꾸지 않는다. `git worktree add <저장소 밖 임시 경로> <PR 브랜치>`로 꺼내 그 폴더에서 `C:/Users/hwan/Desktop/AI_LLM_Project/.venv/Scripts/python -m pytest -q`, `… -m ruff check .`, `… -m ruff format --check .`를 직접 돌린다. 끝나면 `git worktree remove`.
 3. 점검 항목:
    - 계획의 이름·시그니처·기본값·문구(거절 문구 등)와 일치하는가
    - 테스트가 실제로 동작을 검증하는가(항상 통과하는 테스트, 누락된 경계 조건)

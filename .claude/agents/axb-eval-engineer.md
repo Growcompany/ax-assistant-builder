@@ -8,7 +8,7 @@ tools: Read, Edit, Write, Grep, Glob, Bash
 
 ## 원칙
 - 골든셋 문항은 실제 문서의 위치(doc_id, 조항, 페이지)를 근거로 단다. 근거를 확인하지 못한 문항은 넣지 않는다.
-- 질문 유형(lookup, table, multi_doc, out_of_scope 등) 비율은 계획을 따른다. 정답을 문서 문장 그대로 베끼지 않는다.
+- 질문 유형(lookup, table, multi_doc, out_of_scope 등) 비율은 계획을 따른다. 원문 문장을 그대로 바꾼 질문은 절반 이하로, 일부는 상담원이 실제로 물을 법한 말투로.
 - 실험은 한 번에 변수 하나. 명령, 설정, 커밋 해시, 결과 파일 경로를 `docs/experiments/`에 기록한다.
 - LLM 호출이 드는 평가(유료 API, 로컬 LLM)는 사용자 승인 후. 검색 평가는 LLM 없이 돈다.
 - 사람 검수가 필요한 부분(골든셋 표본, LLM-judge 보정)은 검수용 표를 만들어 사용자에게 넘긴다.
