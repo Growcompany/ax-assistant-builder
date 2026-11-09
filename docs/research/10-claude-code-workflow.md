@@ -352,7 +352,7 @@ jobs:
 - S39 저장소와 로컬 직접 확인 [확인]
   - https://github.com/Growcompany/ax-assistant-builder/pull/1
   - https://github.com/Growcompany/ax-assistant-builder/actions/runs/42604753011
-  - 로컬 `C:\Users\hwan\Desktop\AI_LLM_Project\.github\workflows\ci.yml`, `pyproject.toml`, `CLAUDE.md`, `docs/superpowers/plans/2026-11-09-m1-thin-e2e.md`, `git status`, `claude --version`
+  - 로컬 `<repo>\.github\workflows\ci.yml`, `pyproject.toml`, `CLAUDE.md`, `docs/superpowers/plans/2026-11-09-m1-thin-e2e.md`, `git status`, `claude --version`
 - S40 https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_pipeline_chain_operators [추정 — 열어 보지 않음]
 - S41 https://docs.github.com/en/code-security/dependabot/working-with-dependabot/keeping-your-actions-up-to-date-with-dependabot [추정 — 열어 보지 않음]
 - S42 https://pytorch.org/get-started/locally/ [추정 — 열어 보지 않음]

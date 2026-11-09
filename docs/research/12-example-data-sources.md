@@ -212,4 +212,4 @@ curl "https://www.ftc.go.kr/www/downloadBbsFile.do?atchmnflNo=14866"   # 예금�
   - HF 재업로드본: https://huggingface.co/datasets/shchoice/finance-legal-mrc
   - financial-mmlu-ko: https://huggingface.co/datasets/allganize/financial-mmlu-ko
 
-(프로젝트 파일은 만들거나 수정하지 않았다. 확인 과정에서 받은 HTML·JS 임시 파일만 C:\Users\hwan\AppData\Local\Temp\claude\98e919c71070586c\d418693f-06fd-403b-ba28-04a0db072584\scratchpad 아래에 남아 있다.)
+(프로젝트 파일은 만들거나 수정하지 않았다. 확인 과정에서 받은 HTML·JS 임시 파일만 <임시 폴더> 아래에 남아 있다.)
