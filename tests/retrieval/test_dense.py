@@ -4,9 +4,11 @@ import subprocess
 import sys
 import time
 import types
+from pathlib import Path
 
 import pytest
 
+import axbuilder
 from axbuilder.models import Chunk
 from axbuilder.retrieval.dense import (
     MAX_BATCH_CHARS,
@@ -25,6 +27,25 @@ def chunk(index: int, text: str, doc_id: str = "bank-guide") -> Chunk:
         title="테스트 문서",
         text=text,
     )
+
+
+# pytest는 pyproject의 pythonpath=["src"]로 이 작업 폴더의 src를 import한다. 서브프로세스는 그
+# 설정을 물려받지 않아서, 그냥 실행하면 editable 설치가 가리키는 폴더(다른 worktree일 수 있다)를
+# import한다. 그래서 지금 import한 src를 PYTHONPATH로 넘긴다
+SRC = Path(axbuilder.__file__).resolve().parents[1]
+
+
+def run_python(code: str, **env: str) -> str:
+    """이 작업 폴더의 src를 import하는 새 파이썬 프로세스로 code를 실행하고 stdout을 돌려준다."""
+    pythonpath = os.pathsep.join(filter(None, [str(SRC), os.environ.get("PYTHONPATH")]))
+    return subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env={**os.environ, "PYTHONPATH": pythonpath, "PYTHONIOENCODING": "utf-8", **env},
+        check=True,
+    ).stdout
 
 
 # BM25 테스트와 같은 청크
@@ -99,14 +120,7 @@ def test_hash_embedder_is_normalized_and_deterministic():
         "from axbuilder.retrieval.dense import HashEmbedder;"
         "print(HashEmbedder(dim=32).embed(['전자금융거래 접근매체'])[0])"
     )
-    out = subprocess.run(
-        [sys.executable, "-c", code],
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        env={**os.environ, "PYTHONHASHSEED": "123", "PYTHONIOENCODING": "utf-8"},
-        check=True,
-    ).stdout
+    out = run_python(code, PYTHONHASHSEED="123")
     assert [float(x) for x in out.strip("[]\n").split(",")] == pytest.approx(vec)
 
 
@@ -275,6 +289,22 @@ def test_st_embedder_without_query_prompt(fake_st, monkeypatch):
     assert model.device == "cpu" and kwargs.get("prompt_name") is None
 
 
+def test_st_embedder_accepts_old_dimension_method_name(fake_st, monkeypatch):
+    # 옛 sentence-transformers에는 get_sentence_embedding_dimension만 있다
+    monkeypatch.delattr(fake_st, "get_embedding_dimension")
+    monkeypatch.setattr(fake_st, "get_sentence_embedding_dimension", lambda self: 3, raising=False)
+    assert SentenceTransformerEmbedder("old/model").dim == 3
+
+
+def test_st_embedder_prefers_new_dimension_method_name(fake_st, monkeypatch):
+    # 설치본(6.2.0)에서 옛 이름은 FutureWarning을 낸다. 새 이름이 있으면 새 이름만 쓴다
+    def old_name(self) -> int:
+        raise AssertionError("deprecated get_sentence_embedding_dimension was called")
+
+    monkeypatch.setattr(fake_st, "get_sentence_embedding_dimension", old_name, raising=False)
+    assert SentenceTransformerEmbedder("new/model").dim == 2
+
+
 def test_st_embedder_empty_batch_skips_model(fake_st):
     emb = SentenceTransformerEmbedder("some/model")
     assert emb.embed([]) == []
@@ -308,7 +338,13 @@ def test_dense_module_does_not_import_sentence_transformers():
         "assert 'sentence_transformers' not in sys.modules;"
         "assert 'torch' not in sys.modules"
     )
-    subprocess.run([sys.executable, "-c", code], check=True)
+    run_python(code)
+
+
+def test_subprocess_imports_this_checkout():
+    # 위 두 테스트가 다른 체크아웃의 코드를 검사하지 않는지 (리뷰를 worktree에서 돌릴 때)
+    out = run_python("import axbuilder; print(axbuilder.__file__)")
+    assert Path(out.strip()).resolve().parents[1] == SRC
 
 
 # ---- 실제 모델 (pytest -m slow) ----
