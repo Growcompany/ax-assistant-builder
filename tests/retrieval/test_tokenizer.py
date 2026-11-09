@@ -19,6 +19,26 @@ def test_lone_particles_and_blank_yield_nothing(text):
     assert tokenize(text) == []
 
 
+@pytest.mark.parametrize(("text", "word"), [("30도", "도"), ("말한 이가", "이"), ("가서", "가")])
+def test_keeps_stopword_forms_used_as_content(text, word):
+    # 불용어는 조사를 명사(NN*)로 잘못 읽은 경우에만 버린다. 의존명사·동사는 남긴다
+    assert word in tokenize(text)
+
+
+def test_keeps_number_words():
+    # 수사(NR)가 없으면 둘 다 ["1", "원"]이 되어 금액을 구분하지 못한다
+    assert tokenize("1억원") == ["1", "억", "원"]
+    assert tokenize("1천만원") == ["1", "천만", "원"]
+
+
+@pytest.mark.parametrize(
+    ("text", "serial"), [("고객센터 1588-9999", "1588-9999"), ("2024.01.01 시행", "2024.01.01")]
+)
+def test_keeps_serials(text, serial):
+    # Kiwi는 전화번호·날짜를 W_SERIAL 한 토큰으로 묶는다
+    assert serial in tokenize(text)
+
+
 def test_verbs_are_lemmatized():
     assert "따르" in tokenize("법에 따른 절차")
 
