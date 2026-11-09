@@ -9,7 +9,8 @@ from axbuilder.retrieval.tokenizer import tokenize
 
 class BM25Index:
     def __init__(self, k1: float = 1.5, b: float = 0.75) -> None:
-        if k1 < 0 or not 0 <= b <= 1:
+        # NaN은 모든 비교가 False라서 "k1 < 0"만으로는 통과한다
+        if not (math.isfinite(k1) and k1 >= 0) or not 0 <= b <= 1:
             raise ValueError(f"k1 must be >= 0 and b in [0, 1], got k1={k1}, b={b}")
         self.k1 = k1
         self.b = b
@@ -54,6 +55,8 @@ class BM25Index:
                 tf_part = freq * (self.k1 + 1) / (freq + self._length_norm[i])
                 scores[i] += query_freq * idf * tf_part
 
+        # 권한 밖 청크는 결과에서만 빠진다. IDF·avgdl 통계에는 전체 청크가 들어간다(학습 노트).
+        # None은 필터 없음이므로 사용자 요청을 처리하는 쪽(Task 5·10)은 항상 등급을 넘겨야 한다
         allowed = None if access_levels is None else set(access_levels)
         ranked = sorted(
             (

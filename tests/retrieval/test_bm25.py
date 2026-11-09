@@ -29,6 +29,7 @@ def test_ranks_matching_chunk_first():
 
 def test_rare_term_scores_higher_than_common_term():
     # "예금"은 c1·c3에, "접근매체"는 c2에만 있다
+    # (실제 "예금"은 c3에만 있고 "접근매체"가 두 토큰이라 통과. IDF는 아래 같은 길이 테스트)
     idx = BM25Index()
     idx.build([c1, c2, c3])
     assert idx.search("접근매체", k=1)[0].score > idx.search("예금", k=1)[0].score
@@ -94,6 +95,34 @@ def test_b_controls_length_normalization():
     assert s.score == pytest.approx(lg.score)
 
 
+def test_access_filter_applies_before_top_k():
+    # 위 계획 테스트에서 "예금"은 c3에만 있어서 필터가 결과를 비우기만 해도 통과한다.
+    # 여기서는 권한 밖 청크가 1위가 되도록 만들고, 필터 후 남은 공개 청크가 나오는지 본다
+    internal = chunk(0, "예금 예금 금리", doc_id="internal-rule").model_copy(
+        update={"access_level": "internal"}
+    )
+    public = chunk(0, "예금 한도 안내 절차")
+    idx = BM25Index()
+    idx.build([internal, public])
+    assert [r.chunk for r in idx.search("예금", k=1, access_levels=["public"])] == [public]
+    assert idx.search("예금", k=1)[0].chunk == internal
+    assert idx.search("예금", k=1, access_levels=["public", "internal"])[0].chunk == internal
+
+
+def test_ties_keep_index_order():
+    same = [chunk(i, "예금 금리") for i in (2, 0, 1)]
+    idx = BM25Index()
+    idx.build(same)
+    assert [r.chunk.chunk_id for r in idx.search("예금", k=3)] == [c.chunk_id for c in same]
+
+
+def test_repeated_query_term_counts_each_time():
+    idx = BM25Index()
+    idx.build([c1, c2, c3])
+    once = idx.search("금리", k=1)[0].score
+    assert idx.search("금리 금리", k=1)[0].score == pytest.approx(2 * once)
+
+
 def test_empty_access_levels_returns_nothing():
     idx = BM25Index()
     idx.build([c1, c2, c3])
@@ -127,7 +156,17 @@ def test_build_replaces_previous_index():
     assert idx.search("예금", k=3) == []
 
 
-@pytest.mark.parametrize("params", [{"k1": -0.1}, {"b": -0.1}, {"b": 1.1}])
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"k1": -0.1},
+        {"k1": math.nan},
+        {"k1": math.inf},
+        {"b": -0.1},
+        {"b": 1.1},
+        {"b": math.nan},
+    ],
+)
 def test_rejects_invalid_parameters(params):
     with pytest.raises(ValueError):
         BM25Index(**params)
