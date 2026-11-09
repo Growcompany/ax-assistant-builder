@@ -1,0 +1,185 @@
+# 가상 은행(bank) 워크스페이스 코퍼스 출처 목록 (13개 문서)
+#
+# 원문은 이 저장소에 커밋하지 않는다. scripts/download_corpus.py가 url에서 받아
+# data/workspaces/bank/raw/에 저장하고(git 제외 경로), raw/manifest.json에 sha256과 받은 시각을 남긴다.
+# 이유 (근거: docs/research/12-example-data-sources.md):
+#   - 법령·고시: 저작권법 제7조 제1·2호로 보호받지 않는 저작물이지만, 개정본을 그때그때 받도록 스크립트를 기본으로 한다.
+#   - 공정위 표준약관: 게시물에 공공누리 표시가 없고 공정위 저작권정책상 사전 협의 대상이라 권리 관계가 불명확하다.
+#   - 실제 은행 상품설명서: 은행의 업무상저작물(저작권법 제9조)이라 쓰지 않고, 가상 설명서를 직접 썼다.
+# 저장소에 있는 파일은 직접 쓴 가상 문서 6개(corpus/bank/synthetic, corpus/bank/internal)뿐이다.
+#
+# 항목 = DocMeta 필드(doc_id, title, source, doc_type, access_level, effective_from, effective_to)
+#        + url(받는 문서) 또는 path(저장소 파일) 중 하나 + format + license
+# URL 확인일: 2026-11-09, GET 요청으로 확인(law.go.kr은 HEAD 요청에 404를 돌려준다).
+# 법령이 개정되면 lsiSeq가 바뀐다. 현행본은 https://www.law.go.kr/법령/<법령명> 페이지의 iframe src에서 다시 찾는다.
+# 출처 표기(법령·고시): 국가법령정보센터(법제처)
+
+# 확인: /법령/은행법 → lsiSeq=282001, efYd=20260701. 본문 GET 200 text/html 534,593B, 제1조(목적) 포함
+- doc_id: banking-act
+  title: 은행법
+  source: "국가법령정보센터(법제처), 법률 제21296호(2025. 12. 30., 일부개정)"
+  doc_type: law
+  access_level: public
+  effective_from: 2026-07-01
+  effective_to: null
+  url: "https://www.law.go.kr/LSW/lsInfoR.do?lsiSeq=282001&chrClsCd=010202&efYd=20260701&ancYnChk=0"
+  path: null
+  format: html
+  license: "저작권법 제7조 제1호(법령) 비보호 저작물. 법제처 국가법령정보 이용조건상 영리 포함 자유이용, 출처 표기 필요"
+
+# 확인: /법령/금융소비자보호에관한법률 → lsiSeq=277247, efYd=20260102. 본문 GET 200 text/html 312,679B, 제1조(목적) 포함
+- doc_id: financial-consumer-protection-act
+  title: 금융소비자 보호에 관한 법률
+  source: "국가법령정보센터(법제처), 법률 제21065호(2025. 10. 1., 타법개정)"
+  doc_type: law
+  access_level: public
+  effective_from: 2026-01-02
+  effective_to: null
+  url: "https://www.law.go.kr/LSW/lsInfoR.do?lsiSeq=277247&chrClsCd=010202&efYd=20260102&ancYnChk=0"
+  path: null
+  format: html
+  license: "저작권법 제7조 제1호(법령) 비보호 저작물. 법제처 국가법령정보 이용조건상 영리 포함 자유이용, 출처 표기 필요"
+
+# 확인: /법령/전자금융거래법 → lsiSeq=290247, efYd=20261002. 본문 GET 200 text/html 308,212B, 제1조(목적) 포함
+- doc_id: electronic-financial-transactions-act
+  title: 전자금융거래법
+  source: "국가법령정보센터(법제처), 법률 제22048호(2026. 9. 29., 일부개정)"
+  doc_type: law
+  access_level: public
+  effective_from: 2026-10-02
+  effective_to: null
+  url: "https://www.law.go.kr/LSW/lsInfoR.do?lsiSeq=290247&chrClsCd=010202&efYd=20261002&ancYnChk=0"
+  path: null
+  format: html
+  license: "저작권법 제7조 제1호(법령) 비보호 저작물. 법제처 국가법령정보 이용조건상 영리 포함 자유이용, 출처 표기 필요"
+
+# 확인: /법령/예금자보호법 → lsiSeq=277269, efYd=20260102. 본문 GET 200 text/html 374,568B, 제1조(목적) 포함
+# 보호한도: 제32조 제2항("1억원 이상의 범위에서 대통령령으로 정하는 금액") + 시행령 제18조 제7항("1억원", 2025. 9. 1. 시행)
+- doc_id: depositor-protection-act
+  title: 예금자보호법
+  source: "국가법령정보센터(법제처), 법률 제21065호(2025. 10. 1., 타법개정)"
+  doc_type: law
+  access_level: public
+  effective_from: 2026-01-02
+  effective_to: null
+  url: "https://www.law.go.kr/LSW/lsInfoR.do?lsiSeq=277269&chrClsCd=010202&efYd=20260102&ancYnChk=0"
+  path: null
+  format: html
+  license: "저작권법 제7조 제1호(법령) 비보호 저작물. 법제처 국가법령정보 이용조건상 영리 포함 자유이용, 출처 표기 필요"
+
+# 확인: /행정규칙/전자금융감독규정 → admRulSeq=2100000282622. 본문 GET 200 text/html 335,336B, 제1조(목적) 포함
+- doc_id: efs-supervision-regulation
+  title: 전자금융감독규정
+  source: "국가법령정보센터(법제처), 금융위원회고시 제2026-29호(2026. 7. 15., 일부개정)"
+  doc_type: regulation
+  access_level: public
+  effective_from: 2026-07-15
+  effective_to: null
+  url: "https://www.law.go.kr/LSW/admRulInfoR.do?admRulSeq=2100000282622"
+  path: null
+  format: html
+  license: "저작권법 제7조 제2호(국가의 고시) 비보호 저작물. 출처 표기 필요(국가법령정보센터)"
+
+# 확인: GET 200 application/x-msdownload 249,584B, 첫 바이트 PK(zip), mimetype application/hwp+zip
+#   파일명 "[제10006호] 은행여신거래기본약관(가계용)(2024.09.27. 개정).hwpx"
+#   sha256 2baedcc6f2a9c0d739cc0c65b07776e6ab98b762778f2431067e221e0b1009fe
+#   게시글: https://www.ftc.go.kr/www/selectBbsNttView.do?key=202&bordCd=201&nttSn=11201
+- doc_id: ftc-loan-terms-household
+  title: 은행여신거래기본약관(가계용)
+  source: "공정거래위원회 표준약관 제10006호(2024. 9. 27. 개정)"
+  doc_type: terms
+  access_level: public
+  effective_from: 2024-09-27
+  effective_to: null
+  url: "https://www.ftc.go.kr/www/downloadBbsFile.do?atchmnflNo=14865"
+  path: null
+  format: hwpx
+  license: "권리 관계 불명확: 게시물에 공공누리 표시가 없고 공정위 저작권정책상 공공누리 미부착 자료는 사전 협의 대상 → 원문 커밋 금지, 스크립트로만 받음"
+
+# 확인: GET 200 application/x-msdownload 214,105B, 첫 바이트 PK(zip), mimetype application/hwp+zip
+#   파일명 "[제10012호] 예금거래기본약관(2024.09.27. 개정).hwpx"
+#   sha256 39bb03c23dcc755eea247806e8ecbd330909eef678f96b9f4a367a9f982c1b7c
+#   게시글: https://www.ftc.go.kr/www/selectBbsNttView.do?key=202&bordCd=201&nttSn=11202
+- doc_id: ftc-deposit-terms
+  title: 예금거래기본약관
+  source: "공정거래위원회 표준약관 제10012호(2024. 9. 27. 개정)"
+  doc_type: terms
+  access_level: public
+  effective_from: 2024-09-27
+  effective_to: null
+  url: "https://www.ftc.go.kr/www/downloadBbsFile.do?atchmnflNo=14866"
+  path: null
+  format: hwpx
+  license: "권리 관계 불명확: 게시물에 공공누리 표시가 없고 공정위 저작권정책상 공공누리 미부착 자료는 사전 협의 대상 → 원문 커밋 금지, 스크립트로만 받음"
+
+- doc_id: prod-fixed-deposit
+  title: 한빛 든든 정기예금 상품설명서
+  source: "자체 작성 가상 문서, 한빛은행(가상)"
+  doc_type: product
+  access_level: public
+  effective_from: 2026-11-01
+  effective_to: null
+  url: null
+  path: corpus/bank/synthetic/prod-fixed-deposit.md
+  format: md
+  license: "자체 작성 가상 문서(실존 은행·인물·연락처 없음, 금리·수수료는 가상 수치) → 커밋 가능"
+
+- doc_id: prod-free-savings
+  title: 한빛 자유로운 적금 상품설명서
+  source: "자체 작성 가상 문서, 한빛은행(가상)"
+  doc_type: product
+  access_level: public
+  effective_from: 2026-11-01
+  effective_to: null
+  url: null
+  path: corpus/bank/synthetic/prod-free-savings.md
+  format: md
+  license: "자체 작성 가상 문서(실존 은행·인물·연락처 없음, 금리·수수료는 가상 수치) → 커밋 가능"
+
+- doc_id: prod-mortgage-loan
+  title: 한빛 내집마련 주택담보대출 상품설명서
+  source: "자체 작성 가상 문서, 한빛은행(가상)"
+  doc_type: product
+  access_level: public
+  effective_from: 2026-11-01
+  effective_to: null
+  url: null
+  path: corpus/bank/synthetic/prod-mortgage-loan.md
+  format: md
+  license: "자체 작성 가상 문서(실존 은행·인물·연락처 없음, 금리·수수료는 가상 수치) → 커밋 가능"
+
+- doc_id: guide-counseling
+  title: 한빛은행(가상) 상담 응대 지침
+  source: "자체 작성 가상 내부 문서, 한빛은행(가상) 소비자보호부"
+  doc_type: internal
+  access_level: internal
+  effective_from: 2026-11-01
+  effective_to: null
+  url: null
+  path: corpus/bank/internal/guide-counseling.md
+  format: md
+  license: "자체 작성 가상 문서(실존 은행·인물·연락처 없음) → 커밋 가능"
+
+- doc_id: guide-complaints
+  title: 한빛은행(가상) 민원 처리 절차
+  source: "자체 작성 가상 내부 문서, 한빛은행(가상) 소비자보호부"
+  doc_type: internal
+  access_level: internal
+  effective_from: 2026-11-01
+  effective_to: null
+  url: null
+  path: corpus/bank/internal/guide-complaints.md
+  format: md
+  license: "자체 작성 가상 문서(실존 은행·인물·연락처 없음) → 커밋 가능"
+
+- doc_id: guide-elderly-customers
+  title: 한빛은행(가상) 고령 고객 응대 지침
+  source: "자체 작성 가상 내부 문서, 한빛은행(가상) 소비자보호부·디지털보안부"
+  doc_type: internal
+  access_level: internal
+  effective_from: 2026-11-01
+  effective_to: null
+  url: null
+  path: corpus/bank/internal/guide-elderly-customers.md
+  format: md
+  license: "자체 작성 가상 문서(실존 은행·인물·연락처 없음) → 커밋 가능"
