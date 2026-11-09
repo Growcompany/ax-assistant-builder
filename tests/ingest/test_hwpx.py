@@ -1,4 +1,7 @@
+import struct
+import tracemalloc
 import zipfile
+import zlib
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -95,11 +98,64 @@ def test_hwpx_runs_join_and_space_elements_become_spaces(tmp_path):
 
 
 def test_hwpx_rejects_oversized_sections(tmp_path):
-    # 구역 하나하나는 50MB 아래여도 압축 해제 합계가 50MB를 넘으면 읽지 않는다 (zip bomb 방지)
+    # 구역 하나하나는 50MB 아래여도 풀어 읽은 합계가 50MB를 넘으면 거절한다 (zip bomb 방지)
     big = section_xml(paragraph("가" * 10) + " " * (26 * 1024 * 1024))
     path = write_hwpx(tmp_path / "bomb.hwpx", {"section0.xml": big, "section1.xml": big})
     assert path.stat().st_size < 1024 * 1024  # 압축하면 작다
     with pytest.raises(ValueError, match="50MB"):
+        load_document(path, meta_terms, "bank")
+
+
+def forge_size_and_crc(path: Path, name: str, size: int, crc: int) -> None:
+    """ZIP 헤더(로컬 헤더와 중앙 디렉터리)의 압축 해제 크기·CRC를 거짓 값으로 바꾼다."""
+    data = bytearray(path.read_bytes())
+    with zipfile.ZipFile(path) as zf:
+        local = zf.getinfo(name).header_offset
+    struct.pack_into("<I", data, local + 14, crc)
+    struct.pack_into("<I", data, local + 22, size)
+    central = data.find(b"PK\x01\x02")
+    while central != -1:
+        name_len = struct.unpack_from("<H", data, central + 28)[0]
+        if data[central + 46 : central + 46 + name_len] == name.encode():
+            struct.pack_into("<I", data, central + 16, crc)
+            struct.pack_into("<I", data, central + 24, size)
+        central = data.find(b"PK\x01\x02", central + 46)
+    path.write_bytes(data)
+
+
+def test_hwpx_forged_small_size_does_not_inflate_whole_section(tmp_path):
+    # PR #8 리뷰: 헤더에 작은 크기(와 그에 맞춘 CRC)를 적고 실제로는 64MB가 풀리는 구역.
+    # zf.read()는 구역 전체를 한 번에 푼 뒤에야 헤더 크기로 자른다 → 1MB씩 풀어 읽어야 한다
+    xml = section_xml(paragraph("제1조(목적) 가")).encode()
+    path = tmp_path / "forged.hwpx"
+    with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zf.open("Contents/section0.xml", "w") as member:
+            member.write(xml)
+            for _ in range(64):
+                member.write(b" " * (1024 * 1024))
+    forge_size_and_crc(path, "Contents/section0.xml", len(xml), zlib.crc32(xml))
+    assert path.stat().st_size < 1024 * 1024
+
+    tracemalloc.start()
+    try:
+        doc = load_document(path, meta_terms, "bank")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert doc.pages[0].text == "제1조(목적) 가"
+    assert peak < 16 * 1024 * 1024, f"peak {peak:,} bytes"
+
+
+@pytest.mark.parametrize("compression", [zipfile.ZIP_BZIP2, zipfile.ZIP_LZMA])
+def test_hwpx_rejects_sections_not_stored_or_deflated(tmp_path, compression):
+    # zipfile은 bzip2·lzma를 풀 때 한 번에 풀 양의 상한이 없다 (몇 KB가 수백 MB로).
+    # 한컴오피스는 구역을 deflate로 저장한다
+    path = tmp_path / "bz.hwpx"
+    with zipfile.ZipFile(path, "w") as zf:
+        zf.writestr(
+            "Contents/section0.xml", section_xml(paragraph("가")), compress_type=compression
+        )
+    with pytest.raises(ValueError, match="compression"):
         load_document(path, meta_terms, "bank")
 
 

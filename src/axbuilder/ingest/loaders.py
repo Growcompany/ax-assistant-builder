@@ -17,9 +17,14 @@ TEXT_SUFFIXES = {".md", ".txt"}
 
 # HWPX = ZIP 안의 XML. 본문은 Contents/section0.xml, section1.xml, ... 에 나뉘어 있다
 HWPX_SECTION = re.compile(r"Contents/section(\d+)\.xml")
-# 업로드 파일 대비 zip bomb 방지: 읽을 구역들의 압축 해제 크기 합계 상한.
-# zipfile은 헤더에 적힌 크기(file_size)보다 많이 풀어 주지 않으므로 이 합계가 실제 상한이 된다
+# 업로드 파일 대비 zip bomb 방지: 구역들을 실제로 풀어 읽은 바이트 합계의 상한.
+# 헤더에 적힌 크기(file_size)는 위조할 수 있고, zf.read()는 구역 전체를 한 번에 푼 뒤에야
+# 그 크기로 자른다. 그래서 1MB씩 풀어 읽으며 센다
 HWPX_MAX_UNCOMPRESSED = 50 * 1024 * 1024
+HWPX_READ_CHUNK = 1024 * 1024
+# zipfile은 deflate는 요청한 양까지만 풀지만 bzip2·lzma는 한 번에 풀 양의 상한이 없다.
+# 한컴오피스는 구역을 deflate로 저장한다
+HWPX_COMPRESSIONS = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
 _HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 # hp:t 안에서 글자 대신 쓰이는 공백류 요소 (탭, 전각 공백, 줄 안 줄바꿈 등)
 _HP_SPACES = {f"{_HP}{name}" for name in ("tab", "fwSpace", "nbSpace", "lineBreak")}
@@ -67,16 +72,26 @@ def _read_hwpx(path: Path) -> str:
             ]
             if not sections:
                 raise ValueError(f"no Contents/section*.xml in {path.name}; not an HWPX file?")
-            total = sum(info.file_size for _, info in sections)
-            if total > HWPX_MAX_UNCOMPRESSED:
-                raise ValueError(
-                    f"{path.name}: sections expand to {total:,} bytes "
-                    f"(limit {HWPX_MAX_UNCOMPRESSED // (1024 * 1024)}MB)"
-                )
             lines: list[str] = []
+            read = 0  # 지금까지 풀어 읽은 바이트 (모든 구역 합계)
             # 이름순이면 section10이 section2보다 앞에 온다 → 번호(숫자)로 정렬
             for _, info in sorted(sections, key=lambda pair: pair[0]):
-                lines += _hwpx_paragraphs(ET.fromstring(zf.read(info)))
+                if info.compress_type not in HWPX_COMPRESSIONS:
+                    raise ValueError(
+                        f"{path.name}: {info.filename} uses unsupported compression "
+                        f"{info.compress_type} (only stored or deflate)"
+                    )
+                parser = ET.XMLParser()
+                with zf.open(info) as member:
+                    while chunk := member.read(HWPX_READ_CHUNK):
+                        read += len(chunk)
+                        if read > HWPX_MAX_UNCOMPRESSED:
+                            raise ValueError(
+                                f"{path.name}: sections expand to more than "
+                                f"{HWPX_MAX_UNCOMPRESSED // (1024 * 1024)}MB"
+                            )
+                        parser.feed(chunk)
+                lines += _hwpx_paragraphs(parser.close())
     except zipfile.BadZipFile as e:
         raise ValueError(f"{path.name} is not a valid HWPX (zip) file") from e
     except ET.ParseError as e:
