@@ -22,6 +22,8 @@ where = ["src"]
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# docs/ 안의 코드 블록은 실행 코드가 아닌 명세라서 린트·포맷 대상에서 제외
+extend-exclude = ["docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
