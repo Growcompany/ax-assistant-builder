@@ -1,5 +1,5 @@
-import rag_app
+import axbuilder
 
 
 def test_package_imports() -> None:
-    assert rag_app.__version__ == "0.1.0"
+    assert axbuilder.__version__ == "0.1.0"

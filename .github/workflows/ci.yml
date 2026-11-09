@@ -9,11 +9,12 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.13"
           cache: pip
+      # ml extra(sentence-transformers → torch)는 설치하지 않는다: 단위 테스트는 모델 없이 돈다
       - name: Install
         run: pip install -e ".[dev]"
       - name: Lint

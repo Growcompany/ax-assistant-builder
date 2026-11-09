@@ -25,7 +25,7 @@ ruff format .         # 포맷
 ## 폴더 구조
 
 ```
-src/rag_app/      # 애플리케이션 코드
+src/axbuilder/    # 애플리케이션 코드
 tests/            # 테스트
 data/raw/         # 원본 문서 (git 제외)
 data/processed/   # 전처리 결과 (git 제외)

@@ -1,15 +1,30 @@
 [project]
-name = "rag-app"
+name = "axbuilder"
 version = "0.1.0"
-description = "RAG(Retrieval-Augmented Generation) 포트폴리오 프로젝트"
+description = "AX Assistant Builder: 회사 문서로 그 회사 전용 RAG 어시스턴트를 만드는 플랫폼"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pydantic>=2",
+    "kiwipiepy",
+    "pdfplumber",
+    "PyYAML",
+    "qdrant-client",
+    "anthropic",
+    "httpx",
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
+]
+# torch(CUDA)를 끌어오므로 CI·단위 테스트에서는 설치하지 않는다
+ml = [
+    "sentence-transformers",
 ]
 
 [build-system]
@@ -31,3 +46,5 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = ["slow: needs models or network"]
+addopts = "-m 'not slow'"
