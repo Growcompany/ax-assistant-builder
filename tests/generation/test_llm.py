@@ -69,7 +69,8 @@ def test_ollama_sends_think_false_and_num_ctx():
 
 def test_ollama_unreachable_raises():
     llm = OllamaClient("m", "http://127.0.0.1:9", timeout=1)  # 닫힌 포트
-    with pytest.raises(LLMUnavailableError):
+    # 계획보다 강하게: Windows에서 실제로 나는 ConnectTimeout도 해결 방법을 안내하는지 본다
+    with pytest.raises(LLMUnavailableError, match="ollama serve"):
         llm.generate("s", "u")
 
 
@@ -93,6 +94,7 @@ def test_fake_llm_works_through_protocol():
 
 def test_get_llm_cloud(monkeypatch):
     monkeypatch.setenv("AXB_LLM_MODE", "cloud")
+    monkeypatch.delenv("AXB_CLAUDE_MODEL", raising=False)  # 개발 PC 설정과 무관하게 기본값 확인
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")  # 생성만 하고 호출하지 않는다
     llm = get_llm(Settings.from_env())
     assert isinstance(llm, ClaudeClient) and llm.model == "claude-opus-5-5"
@@ -257,9 +259,11 @@ def test_claude_request_uses_fallback_and_no_sampling_params():
 
 
 def test_claude_refusal_returns_empty_text_and_logs(caplog):
+    # 분류기는 출력 도중에도 거절할 수 있다. 거절 전에 나온 부분 출력은 답으로 쓰지 않는다
     def handler(request):
         details = {"type": "refusal", "category": "cyber", "explanation": None}
-        return httpx2.Response(200, json=claude_message([], "refusal", stop_details=details))
+        partial = [{"type": "text", "text": "부분 답"}]
+        return httpx2.Response(200, json=claude_message(partial, "refusal", stop_details=details))
 
     llm = ClaudeClient("claude-opus-5-5", client=claude_client(handler))
     with caplog.at_level(logging.WARNING, logger="axbuilder.generation.llm"):
@@ -293,5 +297,84 @@ def test_claude_overloaded_raises():
         return httpx2.Response(529, json={"type": "error", "error": error})
 
     llm = ClaudeClient("claude-opus-5-5", client=claude_client(handler))
-    with pytest.raises(LLMUnavailableError, match="529"):
+    with pytest.raises(LLMUnavailableError, match="529") as exc_info:
         llm.generate("s", "u")
+    assert "잠시 후 다시 시도" in str(exc_info.value)
+
+
+def test_claude_bad_request_does_not_suggest_retry():
+    # 400 같은 요청 오류는 다시 보내도 같다. 재시도가 아니라 요청과 코드 확인을 안내한다
+    def handler(request):
+        error = {"type": "invalid_request_error", "message": "prompt is too long"}
+        return httpx2.Response(400, json={"type": "error", "error": error})
+
+    llm = ClaudeClient("claude-opus-5-5", client=claude_client(handler))
+    with pytest.raises(LLMUnavailableError, match="400") as exc_info:
+        llm.generate("s", "u")
+    message = str(exc_info.value)
+    assert "prompt is too long" in message and "잠시 후" not in message
+
+
+def write_profile(config_dir, authentication: dict, credentials: dict) -> None:
+    """`ant auth login`이 만드는 user_oauth 프로필(설정 + 자격 증명 파일)을 흉내 낸다."""
+    (config_dir / "configs").mkdir(parents=True)
+    (config_dir / "credentials").mkdir()
+    config = {"authentication": authentication}
+    (config_dir / "configs" / "default.json").write_text(json.dumps(config), encoding="utf-8")
+    credentials_file = config_dir / "credentials" / "default.json"
+    credentials_file.write_text(json.dumps(credentials), encoding="utf-8")
+    credentials_file.chmod(0o600)  # Linux·macOS에서 SDK는 남이 읽을 수 있는 파일을 거부한다
+
+
+@pytest.mark.parametrize(
+    ("authentication", "credentials", "sdk_error", "detail"),
+    [
+        # 토큰이 빠진 프로필
+        ({"type": "user_oauth"}, {}, anthropic.CredentialsError, "access_token"),
+        # 갱신해야 하는 프로필인데 refresh_token이 없다(토큰 갱신 실패와 같은 예외)
+        (
+            {"type": "user_oauth", "client_id": "test-client"},
+            {"access_token": "test-token"},
+            anthropic.WorkloadIdentityError,
+            "refresh_token",
+        ),
+    ],
+    ids=["no-access-token", "no-refresh-token"],
+)
+def test_claude_broken_profile_raises_before_request(
+    monkeypatch, tmp_path, no_anthropic_credentials, authentication, credentials, sdk_error, detail
+):
+    # 프로필이 깨졌으면 SDK가 요청을 보내기 전에 CredentialsError·WorkloadIdentityError를 낸다.
+    # APIError 계열이 아니라서 따로 잡지 않으면 API에서 503이 아니라 500이 된다
+    config_dir = tmp_path / "anthropic-config"
+    write_profile(config_dir, authentication, credentials)
+    monkeypatch.setenv("ANTHROPIC_CONFIG_DIR", str(config_dir))
+    monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)  # 프로필 인증은 https만 허용
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx2.Response(200, json=claude_message([], "end_turn"))
+
+    client = anthropic.Anthropic(
+        max_retries=0,
+        http_client=anthropic.DefaultHttpxClient(transport=httpx2.MockTransport(handler)),
+    )
+    assert client.api_key is None and client.credentials is not None  # 사전 검사는 통과한다
+
+    llm = ClaudeClient("claude-opus-5-5", client=client)
+    with pytest.raises(LLMUnavailableError, match="ant auth login") as exc_info:
+        llm.generate("s", "u")
+    assert isinstance(exc_info.value.__cause__, sdk_error)
+    assert detail in str(exc_info.value)
+    assert requests == []
+
+
+def test_claude_missing_named_profile_raises(monkeypatch, no_anthropic_credentials):
+    # ANTHROPIC_PROFILE로 고른 프로필이 없으면 SDK는 클라이언트를 만들 때 오류를 낸다.
+    # 생성(get_llm)은 성공하고, 호출할 때 LLMUnavailableError로 알려야 한다
+    monkeypatch.setenv("ANTHROPIC_PROFILE", "missing")
+    llm = ClaudeClient("claude-opus-5-5")
+    with pytest.raises(LLMUnavailableError, match="ant auth login") as exc_info:
+        llm.generate("s", "u")
+    assert isinstance(exc_info.value.__cause__, anthropic.CredentialsError)

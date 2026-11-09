@@ -119,15 +119,31 @@ def _ollama_error_detail(response: httpx.Response) -> str:
         return response.text[:200]
 
 
+def _credentials_unavailable(e: anthropic.AnthropicError) -> LLMUnavailableError:
+    return LLMUnavailableError(
+        f"Claude API 인증 정보를 쓸 수 없습니다({e}). `ant auth login`으로 다시 로그인하거나 "
+        "ANTHROPIC_API_KEY를 설정하세요 (키 없이 쓰려면 AXB_LLM_MODE=local)"
+    )
+
+
 class ClaudeClient:
     def __init__(self, model: str, *, client: anthropic.Anthropic | None = None) -> None:
         self.model = model
-        # SDK는 ANTHROPIC_API_KEY → ANTHROPIC_AUTH_TOKEN → `ant auth login` 프로필 순으로
-        # 인증 정보를 찾는다. 없어도 생성은 되고, 호출할 때 LLMUnavailableError로 알린다
-        self._client = client if client is not None else anthropic.Anthropic()
+        # 기본 클라이언트는 첫 호출 때 만든다. SDK는 만들 때 프로필을 읽어서, 고른 프로필이
+        # 깨졌으면 그때 CredentialsError를 낸다. 여기서 터지면 API 서버가 뜨지 못한다
+        self._client = client
+
+    def _get_client(self) -> anthropic.Anthropic:
+        if self._client is None:
+            try:
+                # 인증 정보: ANTHROPIC_API_KEY → ANTHROPIC_AUTH_TOKEN → `ant auth login` 프로필
+                self._client = anthropic.Anthropic()
+            except anthropic.AnthropicError as e:
+                raise _credentials_unavailable(e) from e
+        return self._client
 
     def generate(self, system: str, user: str, max_tokens: int = CLAUDE_MAX_TOKENS) -> LLMResponse:
-        client = self._client
+        client = self._get_client()
         if client.api_key is None and client.auth_token is None and client.credentials is None:
             raise LLMUnavailableError(
                 "Claude API 인증 정보가 없습니다. ANTHROPIC_API_KEY 환경변수를 설정하거나 "
@@ -141,7 +157,8 @@ class ClaudeClient:
                 max_tokens=max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": user}],
-                # 안전 분류기가 거절하면 서버가 거절 분류에 맞는 대체 모델로 같은 요청을 다시 돌린다
+                # 안전 분류기가 거절하면 서버가 거절 분류에 맞는 대체 모델로 같은 요청을 다시
+                # 돌린다. 분류에 따라(예: reasoning_extraction) 폴백 없이 거절로 오기도 한다
                 betas=[CLAUDE_FALLBACK_BETA],
                 fallbacks="default",
             )
@@ -159,8 +176,14 @@ class ClaudeClient:
                 "Claude API 사용 한도(429)에 걸렸습니다. 잠시 후 다시 시도하세요"
             ) from e
         except anthropic.APIStatusError as e:
+            # SDK와 같은 기준: 408·409·5xx(529 포함)는 일시적이고, 나머지 4xx는 요청이 잘못됐다
+            if e.status_code >= 500 or e.status_code in (408, 409):
+                raise LLMUnavailableError(
+                    f"Claude API 오류 {e.status_code}: {e.message}. 잠시 후 다시 시도하세요"
+                ) from e
             raise LLMUnavailableError(
-                f"Claude API 오류 {e.status_code}: {e.message}. 잠시 후 다시 시도하세요"
+                f"Claude API 요청 오류 {e.status_code}: {e.message}. 다시 보내도 같은 오류가 "
+                "나므로 요청(모델, max_tokens, 프롬프트 길이)과 코드를 확인하세요"
             ) from e
         except anthropic.APITimeoutError as e:
             raise LLMUnavailableError(
@@ -170,11 +193,17 @@ class ClaudeClient:
             raise LLMUnavailableError(
                 "Claude API에 연결할 수 없습니다. 인터넷 연결과 프록시 설정을 확인하세요"
             ) from e
+        except (anthropic.CredentialsError, anthropic.WorkloadIdentityError) as e:
+            # 프로필에 토큰이 없거나 토큰 갱신이 실패하면 요청을 보내기 전에 난다(APIError 아님)
+            raise _credentials_unavailable(e) from e
+        except anthropic.AnthropicError as e:
+            raise LLMUnavailableError(f"Claude SDK 오류({type(e).__name__}): {e}") from e
         latency_ms = (time.perf_counter() - start) * 1000
 
         if response.stop_reason == "refusal":
             # 모델의 안전 거절은 오류가 아니라 정상 응답(HTTP 200)이다. 빈 텍스트로 돌려주면
-            # 답변 단계가 거절로 처리한다. stop_details는 없을 수도 있다
+            # 답변 단계가 거절로 처리한다. 출력 도중 거절됐으면 content에 부분 출력이 남는데,
+            # 완성된 답이 아니므로 버린다. stop_details는 없을 수도 있다
             category = response.stop_details.category if response.stop_details else None
             logger.warning(
                 "Claude refused the request: stop_reason=refusal model=%s category=%s",
