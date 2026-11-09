@@ -6,7 +6,8 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "pydantic>=2",
-    "kiwipiepy",
+    # 불용어·테스트의 토큰 수가 Kiwi 분석 결과에 의존한다. 올릴 때는 테스트로 확인
+    "kiwipiepy>=0.24,<0.25",
     "pdfplumber",
     "PyYAML",
     "qdrant-client",
