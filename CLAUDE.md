@@ -46,7 +46,7 @@ PIP_CONFIG_FILE=nul .venv/Scripts/python -m pip install -e ".[dev]"   # 시스�
 ## 지켜야 할 것
 
 - **GitHub은 `Growcompany/ax-assistant-builder` 저장소만** 다룬다. 계정의 다른 저장소·설정은 절대 건드리지 않는다
-- 원본 문서(은행 PDF 등)·`data/workspaces/`·`.env`·API 키는 커밋 금지. 원문 대신 출처 목록(`corpus/*/sources.yaml`)과 다운로드 스크립트를 커밋한다(직접 쓴 가상 문서 `corpus/*/internal/*.md`와 `golden.jsonl`은 커밋 가능)
+- 원본 문서(은행 PDF 등)·`data/workspaces/`·`.env`·API 키는 커밋 금지. 원문 대신 출처 목록(`corpus/*/sources.yaml`)과 다운로드 스크립트를 커밋한다(직접 쓴 가상 문서 `corpus/*/internal/*.md`·`corpus/*/synthetic/*.md`와 `golden.jsonl`은 커밋 가능)
 - 단위 테스트는 네트워크·GPU·모델 다운로드 없이 통과해야 한다. 실제 모델을 쓰면 `@pytest.mark.slow`
 - Claude API: `claude-opus-5-5` 기본, `temperature`/`top_p`/`top_k` 금지(400 오류), `stop_reason == "refusal"` 처리
 - 시스템 소프트웨어 설치(Ollama, Docker 등)와 유료 API 호출은 사용자 승인 후에만
