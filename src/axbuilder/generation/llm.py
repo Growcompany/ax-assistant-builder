@@ -6,8 +6,9 @@ from typing import Protocol
 
 import anthropic
 import httpx
-from pydantic import BaseModel
 
+# LLMResponse는 Answer도 담는 데이터라 models에 두고, 이 모듈에서도 import할 수 있게 둔다
+from axbuilder.models import LLMResponse
 from axbuilder.settings import Settings
 
 logger = logging.getLogger(__name__)
@@ -19,15 +20,6 @@ OLLAMA_NUM_CTX = 8192
 CLAUDE_MAX_TOKENS = 16000
 # fallbacks="default"는 이 헤더와 짝이다. 배열 형식(2026-06-01 헤더)과 섞으면 400
 CLAUDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
-
-
-class LLMResponse(BaseModel):
-    text: str
-    model: str
-    input_tokens: int
-    output_tokens: int
-    latency_ms: float
-    stop_reason: str | None = None
 
 
 class LLMClient(Protocol):
