@@ -33,7 +33,12 @@ class SentenceTransformerEmbedder:
         from sentence_transformers import SentenceTransformer
 
         self._model = SentenceTransformer(model_name, device=device)
-        dim = self._model.get_embedding_dimension()
+        # 설치본(6.2.0)의 정식 이름은 get_embedding_dimension이고, 옛 이름
+        # get_sentence_embedding_dimension은 FutureWarning을 낸다. 옛 이름만 있는 버전도 받는다
+        get_dim = getattr(self._model, "get_embedding_dimension", None)
+        if get_dim is None:
+            get_dim = self._model.get_sentence_embedding_dimension
+        dim = get_dim()
         if dim is None:
             raise ValueError(f"cannot determine embedding dimension of {model_name}")
         self.dim = dim
