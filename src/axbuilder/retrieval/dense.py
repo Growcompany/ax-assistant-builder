@@ -32,6 +32,7 @@ class SentenceTransformerEmbedder:
         # ml extra(torch)가 없는 CI에서도 이 모듈은 import돼야 하므로 여기서 import한다
         from sentence_transformers import SentenceTransformer
 
+        self.model_name = model_name  # API가 색인 정보에 남겨 재시작 후 같은 모델인지 비교한다
         self._model = SentenceTransformer(model_name, device=device)
         # 설치본(6.2.0)의 정식 이름은 get_embedding_dimension이고, 옛 이름
         # get_sentence_embedding_dimension은 FutureWarning을 낸다. 옛 이름만 있는 버전도 받는다
@@ -125,6 +126,13 @@ class DenseIndex:
         # 임베딩이 실패해도 기존 색인이 남도록 컬렉션을 지우기 전에 계산한다
         vectors = self.embedder.embed([c.text for c in chunks])
         if self._client.collection_exists(self.collection):
+            # Windows의 로컬 모드(qdrant-client 1.20)는 delete_collection이 컬렉션의 SQLite 파일을
+            # 닫지 않은 채 지우려다 조용히 실패하고, 같은 이름으로 다시 만들면 그 파일의 옛 점을
+            # 다시 읽는다. 점을 먼저 모두 지워 두면 남은 파일에도 옛 점이 없다
+            self._client.delete(
+                self.collection,
+                points_selector=models.FilterSelector(filter=models.Filter()),
+            )
             self._client.delete_collection(self.collection)
         self._client.create_collection(
             self.collection,
@@ -175,6 +183,23 @@ class DenseIndex:
             with_payload=True,
         ).points
         return [ScoredChunk(chunk=Chunk(**p.payload), score=p.score) for p in points]
+
+    def chunks(self) -> list[Chunk]:
+        """색인에 들어 있는 청크 전부(순서는 정하지 않음). 컬렉션이 없으면 [].
+
+        폴더에 저장한 색인을 다시 열 때, 메모리에만 있는 BM25를 같은 청크로 다시 만드는 데 쓴다.
+        """
+        if not self._client.collection_exists(self.collection):
+            return []
+        result: list[Chunk] = []
+        offset = None
+        while True:
+            points, offset = self._client.scroll(
+                self.collection, limit=256, offset=offset, with_payload=True, with_vectors=False
+            )
+            result.extend(Chunk(**p.payload) for p in points)
+            if offset is None:
+                return result
 
     def close(self) -> None:
         """로컬 모드 폴더 잠금을 푼다. 같은 폴더를 다시 열기 전에 호출한다."""

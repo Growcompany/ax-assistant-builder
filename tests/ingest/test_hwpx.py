@@ -106,6 +106,31 @@ def test_hwpx_rejects_oversized_sections(tmp_path):
         load_document(path, meta_terms, "bank")
 
 
+def test_hwpx_rejects_dtd_entity_expansion(tmp_path):
+    # PR #16 보안 리뷰: 내부 엔티티는 XML 바이트 상한(50MB)을 우회해 풀린다. 이 4KB 구역은
+    # 막지 않으면 텍스트 2백만 자(6MB)가 된다(겹치면 수백 MB). DTD가 나오면 바로 멈춘다
+    entities = '<!ENTITY a "' + "가" * 1000 + '"><!ENTITY b "' + "&a;" * 100 + '">'
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        f"<!DOCTYPE hs:sec [{entities}]>"
+        f'<hs:sec xmlns:hs="{HS}" xmlns:hp="{HP}">'
+        + "<hp:p><hp:run><hp:t>제1조(목적) "
+        + "&b;" * 20
+        + "</hp:t></hp:run></hp:p></hs:sec>"
+    )
+    path = write_hwpx(tmp_path / "entities.hwpx", {"section0.xml": xml})
+    assert path.stat().st_size < 8 * 1024
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(ValueError, match="DTD"):
+            load_document(path, meta_terms, "bank")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 4 * 1024 * 1024, f"peak {peak:,} bytes"
+
+
 def forge_size_and_crc(path: Path, name: str, size: int, crc: int) -> None:
     """ZIP 헤더(로컬 헤더와 중앙 디렉터리)의 압축 해제 크기·CRC를 거짓 값으로 바꾼다."""
     data = bytearray(path.read_bytes())

@@ -7,6 +7,8 @@ import httpx2
 import pytest
 
 from axbuilder.generation.llm import (
+    CLAUDE_MAX_RETRIES,
+    CLAUDE_TIMEOUT,
     ClaudeClient,
     FakeLLM,
     LLMClient,
@@ -378,3 +380,15 @@ def test_claude_missing_named_profile_raises(monkeypatch, no_anthropic_credentia
     with pytest.raises(LLMUnavailableError, match="ant auth login") as exc_info:
         llm.generate("s", "u")
     assert isinstance(exc_info.value.__cause__, anthropic.CredentialsError)
+
+
+def test_claude_default_client_sets_timeout_and_retries(monkeypatch, no_anthropic_credentials):
+    # SDK 기본값(요청당 600초, 재시도 2번)이면 /ask 하나가 최악 30분 넘게 묶인다.
+    # 기본 클라이언트는 우리가 정한 값으로 만든다 (요청은 보내지 않는다)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    client = ClaudeClient("claude-opus-5-5")._get_client()
+    assert client.max_retries == CLAUDE_MAX_RETRIES == 1
+    assert client.timeout == CLAUDE_TIMEOUT
+    assert (CLAUDE_TIMEOUT.read, CLAUDE_TIMEOUT.connect) == (120.0, 5.0)
+    # 시간 초과도 재시도되므로 최악의 대기 = 시도 횟수 × 한 번의 시간 제한 (백오프 제외)
+    assert (CLAUDE_MAX_RETRIES + 1) * CLAUDE_TIMEOUT.read <= 300

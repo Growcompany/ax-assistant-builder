@@ -279,6 +279,14 @@ def test_citation_carries_location_fields(retriever):
         "[1, 2]。",
         ".",
         "…",
+        # 유니코드 숫자 표시도 거절 판정에서는 인용 표시로 보고 지운다(인용 매핑은 ASCII만)
+        "[０]",
+        "[０].",
+        "[٣]",
+        "[１, ２]。",
+        "[1, ٣]",
+        f"[０] {REFUSAL_TEXT}",
+        f"{REFUSAL_TEXT} [１]",
     ],
 )
 def test_refusal_variants(retriever, reply):

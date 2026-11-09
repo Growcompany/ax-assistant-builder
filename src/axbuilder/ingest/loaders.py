@@ -9,6 +9,12 @@ from pathlib import Path
 
 import pdfplumber
 
+from axbuilder.ingest.pdf_guard import (
+    PDFDecodeLimitError,
+    decode_budget,
+    find_limit_error,
+    layout_budget,
+)
 from axbuilder.models import DocMeta, Document, Page
 
 logger = logging.getLogger(__name__)
@@ -25,6 +31,15 @@ HWPX_READ_CHUNK = 1024 * 1024
 # zipfile은 deflate는 요청한 양까지만 풀지만 bzip2·lzma는 한 번에 풀 양의 상한이 없다.
 # 한컴오피스는 구역을 deflate로 저장한다
 HWPX_COMPRESSIONS = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+# PDF 하나에서 pdfminer가 스트림을 풀어 낸 바이트 합계의 상한 (압축 폭탄 방지, pdf_guard).
+# 텍스트 위주 4천 쪽 매뉴얼의 처음 150쪽이 약 3MB로 풀렸다. 실제 문서에는 넉넉하다
+PDF_MAX_DECODED = 256 * 1024 * 1024
+# PDF가 만드는 레이아웃 객체(글자·선·그림) 수의 상한 (글자 폭탄 방지, pdf_guard).
+# 쪽당: 상한 직전(글자 9만 9천 개) 쪽 하나를 읽는 데 최대 약 194MB·2.2초를 쟀다. 빽빽한 텍스트
+# 쪽도 글자 수천 개다. 문서 전체: 청크 상한(약 7백만 자)보다 조금 넉넉하게 두어, 쪽이 아주 많은
+# 폭탄의 파싱 시간을 약 4분으로 묶는다(이 상한이 없으면 해제 상한 256MB까지 약 1.5시간)
+PDF_MAX_LAYOUT_OBJECTS_PER_PAGE = 100_000
+PDF_MAX_LAYOUT_OBJECTS_PER_DOCUMENT = 10_000_000
 _HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 # hp:t 안에서 글자 대신 쓰이는 공백류 요소 (탭, 전각 공백, 줄 안 줄바꿈 등)
 _HP_SPACES = {f"{_HP}{name}" for name in ("tab", "fwSpace", "nbSpace", "lineBreak")}
@@ -32,6 +47,22 @@ _HP_SPACES = {f"{_HP}{name}" for name in ("tab", "fwSpace", "nbSpace", "lineBrea
 
 class UnsupportedFileType(ValueError):
     """지원하지 않는 확장자 (API에서는 415로 바꾼다)."""
+
+
+class DocumentTooLargeError(ValueError):
+    """풀어 낸 내용이 상한을 넘는다 (압축 폭탄으로 본다. API에서는 422)."""
+
+
+class _RejectDTD(ET.TreeBuilder):
+    """DTD(<!DOCTYPE>)가 나오면 파싱을 멈춘다.
+
+    내부 엔티티(<!ENTITY a "...">를 정의하고 &a;를 반복)는 XML 바이트 상한을 우회해 수십~수백 배로
+    풀린다. expat의 billion laughs 방어도 100배까지는 허용한다. 한컴오피스가 만든 구역 XML에는
+    DTD가 없으므로 아예 받지 않는다. 엔티티를 정의하기 전, 문서 머리에서 멈춘다.
+    """
+
+    def doctype(self, name: str, pubid: str | None, system: str | None) -> None:
+        raise ValueError("DTD (<!DOCTYPE>) is not allowed in HWPX section XML")
 
 
 def load_document(path: Path, meta: DocMeta, workspace_id: str) -> Document:
@@ -53,11 +84,26 @@ def load_document(path: Path, meta: DocMeta, workspace_id: str) -> Document:
 
 def _read_pdf(path: Path) -> list[Page]:
     pages = []
-    with pdfplumber.open(path) as pdf:
-        for pdf_page in pdf.pages:
-            text = pdf_page.extract_text() or ""
-            pages.append(Page(number=pdf_page.page_number, text=_normalize(text)))
-            pdf_page.close()  # 페이지별 글자 캐시를 비워 수백 쪽 PDF에서도 메모리가 쌓이지 않게
+    try:
+        with (
+            decode_budget(PDF_MAX_DECODED),
+            layout_budget(PDF_MAX_LAYOUT_OBJECTS_PER_PAGE, PDF_MAX_LAYOUT_OBJECTS_PER_DOCUMENT),
+            pdfplumber.open(path) as pdf,
+        ):
+            for pdf_page in pdf.pages:
+                text = pdf_page.extract_text() or ""
+                pages.append(Page(number=pdf_page.page_number, text=_normalize(text)))
+                # 페이지별 글자 캐시를 비워 수백 쪽 PDF에서도 메모리가 쌓이지 않게
+                pdf_page.close()
+    except Exception as e:
+        limit = find_limit_error(e)
+        if limit is None:
+            raise
+        if isinstance(limit, PDFDecodeLimitError):
+            message = f"PDF streams expand to more than {PDF_MAX_DECODED // (1024 * 1024)}MB"
+        else:
+            message = str(limit)
+        raise DocumentTooLargeError(f"{path.name}: {message}") from e
     return pages
 
 
@@ -81,12 +127,12 @@ def _read_hwpx(path: Path) -> str:
                         f"{path.name}: {info.filename} uses unsupported compression "
                         f"{info.compress_type} (only stored or deflate)"
                     )
-                parser = ET.XMLParser()
+                parser = ET.XMLParser(target=_RejectDTD())
                 with zf.open(info) as member:
                     while chunk := member.read(HWPX_READ_CHUNK):
                         read += len(chunk)
                         if read > HWPX_MAX_UNCOMPRESSED:
-                            raise ValueError(
+                            raise DocumentTooLargeError(
                                 f"{path.name}: sections expand to more than "
                                 f"{HWPX_MAX_UNCOMPRESSED // (1024 * 1024)}MB"
                             )

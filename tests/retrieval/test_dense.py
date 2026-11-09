@@ -228,6 +228,57 @@ def test_persists_to_folder(tmp_path):
         reopened.close()
 
 
+def test_chunks_returns_every_indexed_chunk(tmp_path):
+    # 서버를 다시 켜면 BM25(메모리)는 사라진다. 폴더에 남은 색인에서 청크를 꺼내 다시 만든다
+    many = [chunk(i, f"예금 상품 {i}번 설명") for i in range(300)]  # scroll 한 페이지보다 많게
+    idx = DenseIndex(HashEmbedder(), tmp_path / "qdrant", "bank")
+    idx.build(many)
+    idx.close()
+    reopened = DenseIndex(HashEmbedder(), tmp_path / "qdrant", "bank")
+    try:
+        assert sorted(reopened.chunks(), key=lambda c: c.chunk_id) == many
+    finally:
+        reopened.close()
+
+
+def test_rebuild_on_folder_drops_old_points(tmp_path):
+    # Windows에서 qdrant-client(1.20) 로컬 모드의 delete_collection은 SQLite 파일을 닫지 않고
+    # 지우려다 조용히 실패한다. 같은 이름으로 다시 만들면 옛 점이 되살아났다(재색인 버그)
+    many = [chunk(i, f"예금 {i}") for i in range(3)]
+    idx = DenseIndex(HashEmbedder(), tmp_path / "qdrant", "bank")
+    idx.build(many)
+    idx.build(many[:1])
+    assert idx.chunks() == many[:1]
+    idx.close()
+    reopened = DenseIndex(HashEmbedder(), tmp_path / "qdrant", "bank")
+    try:
+        assert reopened.chunks() == many[:1]
+        reopened.build(many[1:])
+        assert sorted(reopened.chunks(), key=lambda c: c.chunk_id) == many[1:]
+    finally:
+        reopened.close()
+
+
+def test_rebuild_on_folder_with_new_dimension(tmp_path):
+    # 임베딩 모델을 바꿔 차원이 달라져도 같은 폴더에 다시 색인할 수 있다
+    idx = DenseIndex(HashEmbedder(dim=64), tmp_path / "qdrant", "bank")
+    idx.build([c1, c2, c3])
+    idx.close()
+    idx = DenseIndex(HashEmbedder(dim=32), tmp_path / "qdrant", "bank")
+    try:
+        idx.build([c1, c2])
+        assert len(idx.search("예금", k=10)) == 2
+    finally:
+        idx.close()
+
+
+def test_chunks_of_missing_or_empty_collection():
+    idx = DenseIndex(HashEmbedder(), ":memory:", "t")
+    assert idx.chunks() == []
+    idx.build([])
+    assert idx.chunks() == []
+
+
 # ---- SentenceTransformerEmbedder: 실제 모델 없이 호출 방식만 확인 ----
 
 

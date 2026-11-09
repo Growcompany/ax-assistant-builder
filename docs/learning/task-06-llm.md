@@ -51,7 +51,7 @@ answer() ──generate(system, user)──▶ LLMClient ─┬─ OllamaClient 
 | 상황 | Ollama | Claude | 메시지에 담은 해결 방법 |
 |---|---|---|---|
 | 서버 꺼짐·연결 실패 | `ConnectError`, `ConnectTimeout` | `APIConnectionError` | `ollama serve` / 네트워크·프록시 확인 |
-| 응답 시간 초과 | `ReadTimeout` 등 (기본 120초) | `APITimeoutError` (SDK 기본 10분, 2회 재시도) | 첫 호출은 모델 로딩이 느림, `ollama ps` |
+| 응답 시간 초과 | `ReadTimeout` 등 (기본 120초) | `APITimeoutError` (120초, 1회 재시도 — Task 10에서 정함. SDK 기본은 10분, 2회) | 첫 호출은 모델 로딩이 느림, `ollama ps` |
 | 모델 없음 | HTTP 404 | `NotFoundError` | `ollama pull <모델>` / `AXB_CLAUDE_MODEL` |
 | 인증 | — | 키·토큰·프로필 없음(호출 전 검사), 프로필 깨짐(`CredentialsError`·`WorkloadIdentityError`), 401·403 | `ANTHROPIC_API_KEY` 설정 또는 `ant auth login` |
 | 일시적인 HTTP 오류 | 4xx·5xx (서버 오류 문구 포함) | 429, 408·409, 5xx·529 | 상태 코드와 원문, 잠시 후 재시도 |
@@ -62,7 +62,7 @@ answer() ──generate(system, user)──▶ LLMClient ─┬─ OllamaClient 
 - **프로필이 깨진 경우는 사전 검사로 못 잡는다.** `ant auth login` 프로필이 있으면 `credentials`가 채워져 검사를 통과한다. 그런데 토큰이 빠졌거나 갱신에 실패하면 SDK가 요청을 보내기 전에 `CredentialsError`·`WorkloadIdentityError`를 낸다. 둘 다 `AnthropicError`의 하위 클래스지만 `APIError` 계열이 아니라서, 따로 잡지 않으면 API에서 503이 아니라 500이 된다. 리뷰에서 찾은 구멍이고, 지금은 `ant auth login` 안내가 담긴 `LLMUnavailableError`로 바꾼다. 그 밖의 SDK 오류(`AnthropicError`)도 마지막에 `LLMUnavailableError`로 모은다.
 - 같은 이유로 SDK 클라이언트는 `ClaudeClient`를 만들 때가 아니라 **첫 호출 때** 만든다. SDK는 클라이언트를 만들 때 `ANTHROPIC_PROFILE`로 고른 프로필을 읽는데, 그 프로필이 없으면 그 자리에서 `CredentialsError`가 난다. 생성 시점에 터지면 `get_llm()`을 부르는 API 서버가 아예 뜨지 못한다.
 - 상태 코드 오류는 SDK의 재시도 기준과 같게 나눴다. 408·409·429·5xx(529 포함)는 일시적이라 "잠시 후 다시 시도"를, 나머지 4xx는 요청이 잘못된 것이라 "요청과 코드 확인"을 안내한다.
-- Claude 재시도(408·409·429·5xx·연결 오류)는 SDK가 기본 2번 해 준다. 다시 구현하지 않았다. 대신 SDK 기본값(시간 제한 10분, 재시도 2회)이면 요청 하나가 최악의 경우 약 30분(10분 × 3번) 걸린다. API 서버(Task 10)에서 `timeout`·`max_retries`를 정한다.
+- Claude 재시도(408·409·429·5xx·연결 오류)는 SDK가 기본 2번 해 준다. 다시 구현하지 않았다. 대신 SDK 기본값(시간 제한 10분, 재시도 2회)이면 요청 하나가 최악의 경우 약 30분(10분 × 3번) 걸린다. API 서버(Task 10)에서 `timeout`·`max_retries`를 정한다. → Task 10에서 120초·재시도 1회로 정했다(최악 약 4분, 근거는 `task-10-api.md`).
 
 ## 왜 이렇게 했나 (대안과 비교)
 
