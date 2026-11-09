@@ -70,11 +70,14 @@ MAX_DOC_ID_LENGTH = 64
 MAX_QUESTION_CHARS = 2000
 # 문서 하나의 청크 수 상한(약 7백만 자). 색인 시간·메모리와 재시작 후 BM25 재구성 비용을 묶는다
 MAX_CHUNKS_PER_DOCUMENT = 10_000
-# 동시에 도는 문서 파싱 수. PDF 하나가 해제 상한(256MB)까지 쓸 수 있어 최악 메모리를 묶는다
+# 동시에 도는 문서 파싱 수. PDF 하나가 해제 상한(256MB)이나 쪽당 객체 상한(약 200MB)까지 쓸 수
+# 있어 최악 메모리를 묶는다
 MAX_CONCURRENT_PARSES = 2
 COLLECTION = "chunks"
 INDEX_INFO = "index.json"
 _UPLOAD_PATH = re.compile(r"/workspaces/[^/]+/documents")
+# 상태를 바꾸는 요청에서 받아 주는 Sec-Fetch-Site 값 (None = 머리글 없음, 브라우저 밖 클라이언트)
+_ALLOWED_FETCH_SITES = {None, b"same-origin", b"none"}
 
 # 오류 메시지에서 지울 로컬 경로: C:\…, \\server\…, ~/…, /home/…(두 단계 이상인 절대 경로).
 # URL(http://host/path)은 남긴다: 드라이브 문자 앞에 글자가 없어야 하고,
@@ -590,12 +593,14 @@ class _BodySizeLimit:
 
 
 class _RejectCrossSite:
-    """브라우저가 다른 사이트의 페이지에서 보낸 상태 변경 요청(POST 등)을 403으로 막는다.
+    """브라우저가 다른 출처(origin)의 페이지에서 보낸 상태 변경 요청(POST 등)을 403으로 막는다.
 
     multipart 업로드와 본문 없는 POST는 preflight 없는 "단순 요청"이라, 악성 페이지가 사용자
     브라우저를 시켜 127.0.0.1 서버에 문서를 심을 수 있다. 브라우저는 Sec-Fetch-Site 머리글을
-    붙이고 페이지 스크립트는 이 값을 바꿀 수 없다. curl·httpx 같은 브라우저 밖 클라이언트는
-    보내지 않으므로 통과한다. 정식 인증은 M-3.
+    붙이고 페이지 스크립트는 이 값을 바꿀 수 없다. same-site도 막는다: 사이트는 포트를 보지 않아
+    다른 포트의 로컬 개발 서버(localhost:3000) 페이지도 same-site다. same-origin(/docs), none
+    (주소창 직접 입력), 머리글 없음(curl·httpx 같은 브라우저 밖 클라이언트)만 통과한다.
+    정식 인증은 M-3.
     """
 
     def __init__(self, app: Any) -> None:
@@ -604,7 +609,7 @@ class _RejectCrossSite:
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD", "OPTIONS"):
             site = dict(scope["headers"]).get(b"sec-fetch-site")
-            if site == b"cross-site":
+            if site not in _ALLOWED_FETCH_SITES:
                 response = JSONResponse(
                     status_code=403,
                     content={"detail": "다른 사이트에서 보낸 요청은 받지 않습니다"},

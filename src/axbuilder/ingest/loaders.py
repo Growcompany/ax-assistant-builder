@@ -9,7 +9,12 @@ from pathlib import Path
 
 import pdfplumber
 
-from axbuilder.ingest.pdf_guard import decode_budget, hit_decode_limit
+from axbuilder.ingest.pdf_guard import (
+    PDFDecodeLimitError,
+    decode_budget,
+    find_limit_error,
+    layout_budget,
+)
 from axbuilder.models import DocMeta, Document, Page
 
 logger = logging.getLogger(__name__)
@@ -29,6 +34,12 @@ HWPX_COMPRESSIONS = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
 # PDF 하나에서 pdfminer가 스트림을 풀어 낸 바이트 합계의 상한 (압축 폭탄 방지, pdf_guard).
 # 텍스트 위주 4천 쪽 매뉴얼의 처음 150쪽이 약 3MB로 풀렸다. 실제 문서에는 넉넉하다
 PDF_MAX_DECODED = 256 * 1024 * 1024
+# PDF가 만드는 레이아웃 객체(글자·선·그림) 수의 상한 (글자 폭탄 방지, pdf_guard).
+# 쪽당: 상한 직전(글자 9만 9천 개) 쪽 하나를 읽는 데 최대 약 194MB·2.2초를 쟀다. 빽빽한 텍스트
+# 쪽도 글자 수천 개다. 문서 전체: 청크 상한(약 7백만 자)보다 조금 넉넉하게 두어, 쪽이 아주 많은
+# 폭탄의 파싱 시간을 약 4분으로 묶는다(이 상한이 없으면 해제 상한 256MB까지 약 1.5시간)
+PDF_MAX_LAYOUT_OBJECTS_PER_PAGE = 100_000
+PDF_MAX_LAYOUT_OBJECTS_PER_DOCUMENT = 10_000_000
 _HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 # hp:t 안에서 글자 대신 쓰이는 공백류 요소 (탭, 전각 공백, 줄 안 줄바꿈 등)
 _HP_SPACES = {f"{_HP}{name}" for name in ("tab", "fwSpace", "nbSpace", "lineBreak")}
@@ -74,18 +85,25 @@ def load_document(path: Path, meta: DocMeta, workspace_id: str) -> Document:
 def _read_pdf(path: Path) -> list[Page]:
     pages = []
     try:
-        with decode_budget(PDF_MAX_DECODED), pdfplumber.open(path) as pdf:
+        with (
+            decode_budget(PDF_MAX_DECODED),
+            layout_budget(PDF_MAX_LAYOUT_OBJECTS_PER_PAGE, PDF_MAX_LAYOUT_OBJECTS_PER_DOCUMENT),
+            pdfplumber.open(path) as pdf,
+        ):
             for pdf_page in pdf.pages:
                 text = pdf_page.extract_text() or ""
                 pages.append(Page(number=pdf_page.page_number, text=_normalize(text)))
                 # 페이지별 글자 캐시를 비워 수백 쪽 PDF에서도 메모리가 쌓이지 않게
                 pdf_page.close()
     except Exception as e:
-        if not hit_decode_limit(e):
+        limit = find_limit_error(e)
+        if limit is None:
             raise
-        raise DocumentTooLargeError(
-            f"{path.name}: PDF streams expand to more than {PDF_MAX_DECODED // (1024 * 1024)}MB"
-        ) from e
+        if isinstance(limit, PDFDecodeLimitError):
+            message = f"PDF streams expand to more than {PDF_MAX_DECODED // (1024 * 1024)}MB"
+        else:
+            message = str(limit)
+        raise DocumentTooLargeError(f"{path.name}: {message}") from e
     return pages
 
 

@@ -290,6 +290,9 @@ def test_cross_site_browser_requests_are_rejected(client, settings):
     )
     assert r.status_code == 403
     assert client.post("/workspaces/bank/index", headers=cross).status_code == 403
+    # 사이트는 포트를 보지 않아 다른 포트의 로컬 페이지(localhost:3000)는 same-site다. 이것도 막는다
+    same_site = {"Sec-Fetch-Site": "same-site"}
+    assert client.post("/workspaces/bank/index", headers=same_site).status_code == 403
     assert client.get("/health", headers=cross).status_code == 200  # 읽기는 그대로
     assert files_under(settings.data_dir) == {"workspaces/bank/workspace.yaml"}
 
@@ -464,6 +467,17 @@ def test_upload_pdf_bomb_422(monkeypatch, client, settings):
     r = upload(client, "bomb.pdf", bomb, {**META, "doc_id": "bomb"})
     assert r.status_code == 422 and "상한" in r.json()["detail"]
     assert "workspaces/bank/documents/bomb.pdf" not in files_under(settings.data_dir)
+
+
+def test_upload_pdf_glyph_bomb_422(monkeypatch, client, settings):
+    # PR #16 2차 리뷰: 풀린 내용은 409KB여도 글자 객체가 0.8GB를 썼다. 쪽당 객체 수에 상한을 둔다
+    monkeypatch.setattr(loaders, "PDF_MAX_LAYOUT_OBJECTS_PER_PAGE", 1000)
+    client.post("/workspaces", json=WS)
+    bomb = flate_pdf(b"BT /F1 1 Tf 72 720 Td (" + b"A" * 400_000 + b") Tj ET\n")
+    assert len(bomb) < 2 * 1024
+    r = upload(client, "glyphs.pdf", bomb, {**META, "doc_id": "glyphs"})
+    assert r.status_code == 422 and "상한" in r.json()["detail"]
+    assert "workspaces/bank/documents/glyphs.pdf" not in files_under(settings.data_dir)
 
 
 def test_upload_hwpx_with_dtd_entities_422(client, settings):

@@ -9,8 +9,13 @@ deflate는 최대 약 1000배로 풀리고 필터를 겹치면 곱으로 커진�
   그대로 부른다
 - 상한을 넘으면 PDFDecodeLimitError(ValueError)를 던진다. 출력이 상한에 닿는 순간 멈추므로
   메모리는 상한 근처까지만 쓴다
-- CCITTFax 같은 순수 파이썬 디코더의 CPU 시간, 풀린 내용으로 만드는 객체 수는 막지 못한다.
-  이런 위험까지 막으려면 메모리·시간 상한을 건 별도 프로세스에서 파싱해야 한다(M-3)
+- 풀어 낸 바이트만 묶으면 부족하다. pdfplumber는 글자 하나마다 객체(LTChar, 약 2KB)를 만들어,
+  1.5KB PDF가 409KB로 풀린 뒤 글자 40만 개로 0.8GB·38초를 썼다(PR #16 2차 리뷰에서 재현).
+  그래서 layout_budget()이 레이아웃 객체(글자·선·그림) 수를 쪽마다, 문서 전체로 묶는다.
+  쪽을 다 읽으면 pdfplumber가 객체를 버리므로 메모리는 쪽 하나 분량까지만 쓰고, 문서 전체 상한은
+  쪽이 아주 많은 문서의 파싱 시간을 묶는다
+- CCITTFax 같은 순수 파이썬 디코더의 CPU 시간은 막지 못한다. 이런 위험까지 막으려면 메모리·시간
+  상한을 건 별도 프로세스에서 파싱해야 한다(M-3)
 """
 
 import logging
@@ -22,6 +27,7 @@ from io import BytesIO
 from typing import Any
 
 from pdfminer import pdftypes
+from pdfminer.converter import PDFLayoutAnalyzer
 from pdfminer.lzw import LZWDecoder
 
 logger = logging.getLogger(__name__)
@@ -29,8 +35,16 @@ _state = threading.local()
 _STEP = 1024 * 1024  # 한 번에 풀어 내는 양
 
 
-class PDFDecodeLimitError(ValueError):
+class PDFLimitError(ValueError):
+    """PDF 하나가 파싱 자원 상한을 넘었다 (폭탄으로 본다)."""
+
+
+class PDFDecodeLimitError(PDFLimitError):
     """PDF 스트림을 풀어 낸 크기가 상한을 넘었다 (압축 폭탄으로 본다)."""
+
+
+class PDFLayoutLimitError(PDFLimitError):
+    """레이아웃 객체(글자·선·그림) 수가 쪽 또는 문서의 상한을 넘었다."""
 
 
 @contextmanager
@@ -44,17 +58,33 @@ def decode_budget(max_bytes: int) -> Iterator[None]:
         _state.remaining = previous
 
 
-def hit_decode_limit(error: BaseException) -> bool:
-    """error나 그 원인 사슬에 PDFDecodeLimitError가 있나. pdfplumber는 pdfminer 예외를
+_LAYOUT_FIELDS = ("page_limit", "page_used", "doc_limit", "doc_used")
+
+
+@contextmanager
+def layout_budget(max_per_page: int, max_per_document: int) -> Iterator[None]:
+    """이 블록 안(같은 스레드)에서 pdfminer가 만드는 레이아웃 객체 수를 쪽마다, 합계로 제한한다."""
+    previous = [getattr(_state, name, None) for name in _LAYOUT_FIELDS]
+    _state.page_limit, _state.page_used = max_per_page, 0
+    _state.doc_limit, _state.doc_used = max_per_document, 0
+    try:
+        yield
+    finally:
+        for name, value in zip(_LAYOUT_FIELDS, previous, strict=True):
+            setattr(_state, name, value)
+
+
+def find_limit_error(error: BaseException) -> PDFLimitError | None:
+    """error나 그 원인 사슬에 있는 PDFLimitError. pdfplumber는 pdfminer 예외를
     PdfminerException으로 감싸 다시 던진다."""
     current: BaseException | None = error
     visited: set[int] = set()
     while current is not None and id(current) not in visited:
-        if isinstance(current, PDFDecodeLimitError):
-            return True
+        if isinstance(current, PDFLimitError):
+            return current
         visited.add(id(current))
         current = current.__cause__ or current.__context__
-    return False
+    return None
 
 
 def _remaining() -> int | None:
@@ -179,12 +209,57 @@ def _rldecode(data: bytes) -> bytes:
     return out
 
 
+# ---- 레이아웃 객체 수 ----
+
+_original_begin_page = PDFLayoutAnalyzer.begin_page
+_original_render_char = PDFLayoutAnalyzer.render_char
+_original_paint_path = PDFLayoutAnalyzer.paint_path
+_original_render_image = PDFLayoutAnalyzer.render_image
+
+
+def _count_layout_object() -> None:
+    if getattr(_state, "page_limit", None) is None:
+        return
+    _state.page_used += 1
+    _state.doc_used += 1
+    if _state.page_used > _state.page_limit:
+        raise PDFLayoutLimitError(f"a page has more than {_state.page_limit:,} layout objects")
+    if _state.doc_used > _state.doc_limit:
+        raise PDFLayoutLimitError(f"the PDF has more than {_state.doc_limit:,} layout objects")
+
+
+def _begin_page(self: PDFLayoutAnalyzer, *args: Any, **kwargs: Any) -> None:
+    _state.page_used = 0  # 쪽 상한은 쪽마다 다시 센다
+    _original_begin_page(self, *args, **kwargs)
+
+
+def _render_char(self: PDFLayoutAnalyzer, *args: Any, **kwargs: Any) -> float:
+    _count_layout_object()
+    return _original_render_char(self, *args, **kwargs)
+
+
+def _paint_path(self: PDFLayoutAnalyzer, *args: Any, **kwargs: Any) -> None:
+    # 하위 경로가 여러 개인 path는 pdfminer가 self.paint_path를 하위 경로마다 다시 불러 각각 센다
+    _count_layout_object()
+    _original_paint_path(self, *args, **kwargs)
+
+
+def _render_image(self: PDFLayoutAnalyzer, *args: Any, **kwargs: Any) -> None:
+    _count_layout_object()
+    _original_render_image(self, *args, **kwargs)
+
+
 def install() -> None:
-    """pdftypes의 해제 함수를 바꿔 끼운다. 여러 번 불러도 한 번만 바뀐다."""
+    """pdftypes의 해제 함수와 PDFLayoutAnalyzer의 객체 생성 함수를 바꿔 끼운다.
+    여러 번 불러도 한 번만 바뀐다. pdfplumber의 집계기는 super()로 이 함수들을 부른다."""
     pdftypes.zlib = _BoundedZlib()  # type: ignore[assignment]
     pdftypes.decompress_corrupted = _inflate_corrupted
     pdftypes.lzwdecode = _lzwdecode
     pdftypes.rldecode = _rldecode
+    PDFLayoutAnalyzer.begin_page = _begin_page  # type: ignore[method-assign]
+    PDFLayoutAnalyzer.render_char = _render_char  # type: ignore[method-assign]
+    PDFLayoutAnalyzer.paint_path = _paint_path  # type: ignore[method-assign]
+    PDFLayoutAnalyzer.render_image = _render_image  # type: ignore[method-assign]
 
 
 install()
