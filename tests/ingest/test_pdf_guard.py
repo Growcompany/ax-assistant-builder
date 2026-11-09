@@ -7,6 +7,7 @@ import io
 import tracemalloc
 import zlib
 
+import pdfplumber
 import pytest
 from pdfminer import pdftypes
 
@@ -36,6 +37,12 @@ def make_pdf(content: bytes, filters: tuple[str, ...] = ()) -> bytes:
         4: b"<< /Length %d%s >>\nstream\n%s\nendstream" % (len(stream), filter_entry, stream),
         5: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
     }
+    return write_pdf(objs)
+
+
+def write_pdf(objs: dict[int, bytes]) -> bytes:
+    """번호가 1부터 빈틈없이 이어지는 객체들로 PDF 파일(xref 포함)을 만든다."""
+    size = len(objs) + 1
     out = io.BytesIO()
     out.write(b"%PDF-1.4\n")
     offsets = {}
@@ -43,9 +50,9 @@ def make_pdf(content: bytes, filters: tuple[str, ...] = ()) -> bytes:
         offsets[num] = out.tell()
         out.write(b"%d 0 obj\n%s\nendobj\n" % (num, objs[num]))
     xref_at = out.tell()
-    out.write(b"xref\n0 6\n0000000000 65535 f \n")
-    out.write(b"".join(b"%010d 00000 n \n" % offsets[num] for num in range(1, 6)))
-    out.write(b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % xref_at)
+    out.write(b"xref\n0 %d\n0000000000 65535 f \n" % size)
+    out.write(b"".join(b"%010d 00000 n \n" % offsets[num] for num in range(1, size)))
+    out.write(b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (size, xref_at))
     return out.getvalue()
 
 
@@ -159,3 +166,84 @@ def test_lzw_stops_at_limit():
         assert pdftypes.lzwdecode(data) == b"abc" * 400
     with pdf_guard.decode_budget(1000), pytest.raises(pdf_guard.PDFDecodeLimitError):
         pdftypes.lzwdecode(data)
+
+
+# ---- 글자 폭탄 (PR #16 2차 리뷰): 풀린 내용은 작아도 글자 객체가 메모리를 쓴다 ----
+
+
+def glyph_ops(count: int) -> bytes:
+    return b"BT /F1 1 Tf 72 720 Td (" + b"A" * count + b") Tj ET\n"
+
+
+def test_glyph_bomb_stops_at_page_object_limit(tmp_path, monkeypatch):
+    # 1.5KB PDF가 글자 40만 개(0.8GB, 38초)가 됐다. 쪽당 객체 상한에 닿는 순간 멈춰야 한다
+    monkeypatch.setattr(loaders, "PDF_MAX_LAYOUT_OBJECTS_PER_PAGE", 1000)
+    path = tmp_path / "glyphs.pdf"
+    path.write_bytes(make_pdf(glyph_ops(400_000), ("FlateDecode",)))
+    assert path.stat().st_size < 2 * 1024
+
+    tracemalloc.start()
+    try:
+        with pytest.raises(DocumentTooLargeError, match="1,000 layout objects"):
+            load_document(path, meta, "bank")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 16 * MB, f"peak {peak:,} bytes"
+
+
+def test_path_objects_count_toward_page_limit(tmp_path, monkeypatch):
+    # 선(path)도 객체를 만든다. 하위 경로가 여러 개인 path는 하위 경로마다 센다
+    monkeypatch.setattr(loaders, "PDF_MAX_LAYOUT_OBJECTS_PER_PAGE", 100)
+    path = tmp_path / "paths.pdf"
+    path.write_bytes(make_pdf(b"0 0 m 1 1 l " * 101 + b"S\n", ("FlateDecode",)))
+    with pytest.raises(DocumentTooLargeError, match="100 layout objects"):
+        load_document(path, meta, "bank")
+
+
+def test_page_at_object_limit_still_parses(tmp_path, monkeypatch):
+    monkeypatch.setattr(loaders, "PDF_MAX_LAYOUT_OBJECTS_PER_PAGE", 1000)
+    path = tmp_path / "ok.pdf"
+    path.write_bytes(make_pdf(glyph_ops(1000)))
+    assert load_document(path, meta, "bank").pages[0].text == "A" * 1000
+
+
+def test_layout_budget_is_scoped_to_the_block(tmp_path):
+    path = tmp_path / "ok.pdf"
+    path.write_bytes(make_pdf(glyph_ops(50)))
+    with pdf_guard.layout_budget(10, 1000), pdfplumber.open(path) as pdf:
+        with pytest.raises(Exception) as excinfo:
+            pdf.pages[0].extract_text()
+        assert isinstance(pdf_guard.find_limit_error(excinfo.value), pdf_guard.PDFLayoutLimitError)
+    with pdfplumber.open(path) as pdf:  # 블록 밖: 상한 없음
+        assert pdf.pages[0].extract_text() == "A" * 50
+
+
+def make_multipage_pdf(page_contents: list[bytes]) -> bytes:
+    """쪽마다 내용 스트림 하나(압축 없음). 객체 번호: 쪽 4, 6, ..., 그 내용 5, 7, ..."""
+    page_ids = [4 + 2 * i for i in range(len(page_contents))]
+    kids = b" ".join(b"%d 0 R" % pid for pid in page_ids)
+    objs = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /Kids [%s] /Count %d >>" % (kids, len(page_ids)),
+        3: b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    }
+    for pid, content in zip(page_ids, page_contents, strict=True):
+        objs[pid] = (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << /Font << /F1 3 0 R >> >> /Contents %d 0 R >>" % (pid + 1)
+        )
+        objs[pid + 1] = b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content)
+    return write_pdf(objs)
+
+
+def test_page_limit_resets_per_page_but_document_limit_does_not(tmp_path, monkeypatch):
+    # 쪽마다 60개: 쪽 상한 100은 넘지 않는다. 3쪽 합계 180 > 문서 상한 150
+    monkeypatch.setattr(loaders, "PDF_MAX_LAYOUT_OBJECTS_PER_PAGE", 100)
+    monkeypatch.setattr(loaders, "PDF_MAX_LAYOUT_OBJECTS_PER_DOCUMENT", 150)
+    path = tmp_path / "pages.pdf"
+    path.write_bytes(make_multipage_pdf([glyph_ops(60)] * 2))
+    assert [p.text for p in load_document(path, meta, "bank").pages] == ["A" * 60] * 2
+    path.write_bytes(make_multipage_pdf([glyph_ops(60)] * 3))
+    with pytest.raises(DocumentTooLargeError, match="the PDF has more than 150 layout objects"):
+        load_document(path, meta, "bank")
