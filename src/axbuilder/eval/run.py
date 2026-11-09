@@ -4,7 +4,8 @@
     python -m axbuilder.eval.run --workspace bank --retriever {bm25,dense,hybrid} --k 5 [--with-llm]
 결과는 reports/{workspace}/{YYYYmmdd-HHMM}-{retriever}.json에 저장하고 마크다운 표로 출력한다.
 원문은 미리 받아 두어야 한다(python scripts/download_corpus.py bank). --with-llm은 AXB_LLM_MODE를
-따른다(기본 local = Ollama). 색인은 메모리에만 만든다.
+따른다(기본 local = Ollama). cloud면 문항마다 유료 Claude API를 부르므로 --allow-cloud를 함께
+줘야 한다. 색인은 메모리에만 만든다.
 """
 
 import argparse
@@ -97,7 +98,14 @@ def run_eval(
                 else []
             )
         else:
-            result = answer(item.question, retriever, llm, workspace, role, k=k)
+            try:
+                result = answer(item.question, retriever, llm, workspace, role, k=k)
+            except LLMUnavailableError as e:
+                # 일부만 채점한 보고서는 완전한 보고서와 섞여 비교를 흐리므로 남기지 않고,
+                # 어디서 멈췄는지만 알린다
+                raise LLMUnavailableError(
+                    f"{item.id} ({len(records)}/{len(scored)} scored): {e}"
+                ) from e
             retrieved = result.retrieved
         latency_ms = (time.perf_counter() - t0) * 1000
         records.append(_record(item, retrieved, k, result, latency_ms))
@@ -236,34 +244,52 @@ def load_corpus_chunks(
 
 
 def format_markdown(report: EvalReport) -> str:
-    """전체·qtype별·근거 단위별 표. 근거 단위별 행으로 문서 단위 근거의 부풀림을 본다."""
+    """전체·qtype별·근거 단위별 표. 근거 단위별 행으로 문서 단위 근거의 부풀림을 본다.
+
+    LLM 표는 지표마다 분모가 달라 "근거 n"(Recall·MRR의 분모)과 "인용 n"(인용 정밀도의
+    분모) 열을 함께 보여 준다. 거절 정확도의 분모는 n이다.
+    """
     config = report.config
     with_llm = bool(config.get("with_llm"))
     k = config.get("k")
-    columns = ["구분", "n", f"Recall@{k}", "MRR"]
-    names = ["recall_at_k", "mrr"]
+    # (열 이름, 지표 이름, 분모 열인가) — 분모 열은 그 지표 값이 있는 문항 수를 센다
+    layout = [(f"Recall@{k}", "recall_at_k", False), ("MRR", "mrr", False)]
     if with_llm:
-        columns += ["인용 정밀도", "거절 정확도"]
-        names += ["citation_precision", "refusal_accuracy"]
+        layout = [
+            ("근거 n", "recall_at_k", True),
+            *layout,
+            ("인용 n", "citation_precision", True),
+            ("인용 정밀도", "citation_precision", False),
+            ("거절 정확도", "refusal_accuracy", False),
+        ]
+    columns = ["구분", "n", *(column for column, _, _ in layout)]
 
-    def row(label: str, summary: dict[str, float]) -> str:
+    def row(label: str, summary: dict[str, float], records: list[dict[str, Any]]) -> str:
         cells = [label, str(int(summary["n"]))]
-        cells += [f"{summary[name]:.3f}" if name in summary else "-" for name in names]
+        for _, name, is_count in layout:
+            if is_count:
+                key = _SUMMARY_KEYS[name]
+                cells.append(str(sum(r.get(key) is not None for r in records)))
+            else:
+                cells.append(f"{summary[name]:.3f}" if name in summary else "-")
         return "| " + " | ".join(cells) + " |"
 
-    overall = {"n": report.n}
-    for name in names:
+    overall: dict[str, float] = {"n": report.n}
+    for name in _SUMMARY_KEYS:
         value = getattr(report, name)
         if value is not None:
             overall[name] = value
-    rows = [row("전체", overall)]
-    rows += [row(qtype, summary) for qtype, summary in report.by_qtype.items()]
+    rows = [row("전체", overall, report.items)]
+    rows += [
+        row(qtype, summary, [r for r in report.items if r["qtype"] == qtype])
+        for qtype, summary in report.by_qtype.items()
+    ]
     article_only = [r for r in report.items if r["evidence"] and not r["doc_level_evidence"]]
     doc_level = [r for r in report.items if r["doc_level_evidence"]]
     if article_only:
-        rows.append(row("조항 단위 근거만", summarize(article_only)))
+        rows.append(row("조항 단위 근거만", summarize(article_only), article_only))
     if doc_level:
-        rows.append(row("문서 단위 근거 포함", summarize(doc_level)))
+        rows.append(row("문서 단위 근거 포함", summarize(doc_level), doc_level))
 
     levels = ", ".join(config.get("access_levels", []))
     lines = [
@@ -396,6 +422,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--retriever", choices=RETRIEVERS, required=True)
     parser.add_argument("--k", type=int, default=5)
     parser.add_argument("--with-llm", action="store_true", help="answer()로 답변 지표까지")
+    parser.add_argument(
+        "--allow-cloud",
+        action="store_true",
+        help="AXB_LLM_MODE=cloud에서 --with-llm으로 유료 Claude API 호출을 허락",
+    )
     parser.add_argument("--role", default=DEFAULT_ROLE)
     parser.add_argument("--corpus-dir", type=Path, default=REPO_ROOT / "corpus")
     parser.add_argument("--reports-dir", type=Path, default=Path("reports"))
@@ -422,6 +453,22 @@ def main(argv: list[str] | None = None) -> int:
         print("golden set problems:\n" + "\n".join(problems), file=sys.stderr)
         return 1
 
+    llm_model = None
+    if args.with_llm:
+        llm_model = settings.claude_model if settings.llm_mode == "cloud" else settings.local_model
+        # 예열 1번 + 문항마다 최대 1번 (검색 결과가 없는 문항은 LLM을 부르지 않는다)
+        max_calls = len(items) + 1
+        if settings.llm_mode == "cloud" and not args.allow_cloud:
+            parser.error(
+                f"AXB_LLM_MODE=cloud: --with-llm makes up to {max_calls} paid Claude API calls "
+                f"({llm_model}); add --allow-cloud to proceed"
+            )
+        print(
+            f"LLM: {settings.llm_mode} {llm_model}, up to {max_calls} calls "
+            f"(1 warm-up + {len(items)} questions)",
+            file=sys.stderr,
+        )
+
     t0 = time.perf_counter()
     try:
         chunks = load_corpus_chunks(corpus_dir / "sources.yaml", raw_dir, repo_root, workspace.id)
@@ -444,9 +491,6 @@ def main(argv: list[str] | None = None) -> int:
         print(f"LLM unavailable: {e}", file=sys.stderr)
         return 1
 
-    llm_model = None
-    if llm is not None:
-        llm_model = settings.claude_model if settings.llm_mode == "cloud" else settings.local_model
     report.config.update(
         {
             "retriever": args.retriever,
