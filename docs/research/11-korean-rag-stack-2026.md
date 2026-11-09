@@ -236,7 +236,7 @@ python -c "import torch;print(torch.__version__,torch.version.cuda,torch.cuda.is
 |---|---|---|---|
 | Dense 임베딩 | `dragonkue/snowflake-arctic-embed-l-v2.0-ko` (1024차원, `prompt_name="query"`) | 베이스라인 `BAAI/bge-m3`, 상향 실험 `nlpai-lab/KURE-v3` (`truncate_dim=1024`) | [3][4][10] |
 | Lexical | Kiwi BM25 유지. 태그 `NNG NNP NNB NR NP VV VA XR SL SN SH`를 접두사로 비교 | 실험 `KURE-Sparse-nano` | [14][48] |
-| 결합 | RRF k=60을 직접 구현 [추정] | Qdrant를 쓰면 `Rrf(k=60)`을 명시 (기본값 2) | [53] |
+| 결합 | RRF k=60을 직접 구현 [추정] | Qdrant를 쓰면 `Rrf(k=61)`을 명시 (기본값 2, 순위를 0부터 세서 `1/(k+순위-1)` — 2026-11 qdrant-client 1.20.0 로컬 모드로 확인) | [53] |
 | 리랭커 | `nlpai-lab/KURE-Reranker-nano` (0.60GB, CPU도 가능 [추정]) | `BAAI/bge-reranker-v2-m3` | [16][17][18] |
 | 로컬 LLM | `qwen3.5:4b-q4_K_M` + `think:false`, `num_ctx:8192` | `qwen3.5:9b-q4_K_M` (임베딩·리랭크는 CPU). 비교군 `exaone3.5:7.8b` (NC) | [27][32][41][43][44] |
 | 클라우드 LLM / judge | `claude-opus-5-5` (생성 모델과 계열이 다르므로 judge로 적합) | – | [68][71] |
