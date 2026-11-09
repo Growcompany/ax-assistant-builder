@@ -16,6 +16,8 @@ index/의 Qdrant 색인을 열고, 그 안의 청크로 BM25를 다시 만든다
 POST /index를 다시 불러야 질문에 반영된다.
 """
 
+import functools
+import getpass
 import hashlib
 import json
 import logging
@@ -27,17 +29,17 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, BinaryIO
+from typing import Annotated, Any, BinaryIO, Literal
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, StringConstraints, field_validator
+from pydantic import AfterValidator, BaseModel, Field, StringConstraints, field_validator
 
 from axbuilder.corpus import DOC_ID
 from axbuilder.generation.answer import answer
 from axbuilder.generation.llm import LLMClient, LLMUnavailableError, get_llm
 from axbuilder.ingest.chunking import chunk_document
-from axbuilder.ingest.loaders import load_document
+from axbuilder.ingest.loaders import DocumentTooLargeError, load_document
 from axbuilder.models import Chunk, Citation, DocMeta, ScoredChunk
 from axbuilder.retrieval.bm25 import BM25Index
 from axbuilder.retrieval.dense import DenseIndex, Embedder
@@ -55,15 +57,24 @@ from axbuilder.workspace import (
 logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 파일 하나의 상한 (실제로 읽은 바이트로 센다)
-# 요청 본문 전체의 상한 = 파일 상한 + 양식 필드·multipart 머리글 여유분
+# 업로드 요청 본문 전체의 상한 = 파일 상한 + 양식 필드·multipart 머리글 여유분
 UPLOAD_OVERHEAD_BYTES = 1024 * 1024
+# 업로드가 아닌 요청(JSON) 본문의 상한. 질문은 2000자, 워크스페이스 설정도 몇 KB면 된다
+MAX_JSON_BYTES = 64 * 1024
 READ_CHUNK_BYTES = 1024 * 1024
 SUPPORTED_SUFFIXES = (".pdf", ".hwpx", ".txt", ".md")  # load_document가 읽는 형식
-SIGNATURE_WINDOW = 1024  # PDF 규격은 %PDF- 머리글이 처음 1024바이트 안에 있으면 된다
+# 규격(ISO 32000)은 %PDF- 머리글을 첫 줄에 두라고 하지만, Adobe Reader는 앞 1024바이트 안이면
+# 읽는다(PDF Reference 부록 H의 관례). 앞에 쓰레기가 붙은 실제 파일도 받으려고 관례를 따른다
+SIGNATURE_WINDOW = 1024
 MAX_DOC_ID_LENGTH = 64
 MAX_QUESTION_CHARS = 2000
+# 문서 하나의 청크 수 상한(약 7백만 자). 색인 시간·메모리와 재시작 후 BM25 재구성 비용을 묶는다
+MAX_CHUNKS_PER_DOCUMENT = 10_000
+# 동시에 도는 문서 파싱 수. PDF 하나가 해제 상한(256MB)까지 쓸 수 있어 최악 메모리를 묶는다
+MAX_CONCURRENT_PARSES = 2
 COLLECTION = "chunks"
 INDEX_INFO = "index.json"
+_UPLOAD_PATH = re.compile(r"/workspaces/[^/]+/documents")
 
 # 오류 메시지에서 지울 로컬 경로: C:\…, \\server\…, ~/…, /home/…(두 단계 이상인 절대 경로).
 # URL(http://host/path)은 남긴다: 드라이브 문자 앞에 글자가 없어야 하고,
@@ -81,8 +92,43 @@ class EmbedderUnavailableError(RuntimeError):
     """임베딩 모델을 불러올 수 없다 (503). 메시지에 해결 방법을 담는다."""
 
 
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")  # 제어 문자와 유니코드 줄 구분자
+
+
+def _single_line(value: str) -> str:
+    # 제목·이름은 프롬프트의 자료 머리 줄·시스템 프롬프트에 그대로 들어간다. 줄바꿈이 있으면
+    # "[질문]" 같은 구분 줄을 위조할 수 있다
+    if _CONTROL.search(value):
+        raise ValueError("must be a single line without control characters")
+    return value
+
+
+def _line(max_length: int, min_length: int = 0) -> Any:
+    """한 줄(제어 문자 없음), 앞뒤 공백 제거, 길이 상한이 있는 문자열 타입."""
+    return Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=min_length, max_length=max_length),
+        AfterValidator(_single_line),
+    ]
+
+
+Title = _line(200, min_length=1)
+Source = _line(500)
+WorkspaceName = _line(100, min_length=1)
+Industry = _line(50)
+RoleName = _line(50, min_length=1)
+
+
 class UploadMeta(DocMeta):
-    """업로드 양식의 DocMeta. doc_id는 저장 파일 이름이 되므로 경로 문자를 막는다."""
+    """업로드 양식의 DocMeta. doc_id는 저장 파일 이름이 되므로 경로 문자를 막는다.
+
+    access_level은 기본값 없이 반드시 받는다. DocMeta의 기본값(public)대로면 빠뜨린 내부 문서가
+    모두에게 보인다(fail-open). DocMeta 계약(코퍼스 sources.yaml)은 그대로 둔다.
+    """
+
+    title: Title
+    source: Source
+    access_level: Literal["public", "internal"]
 
     @field_validator("doc_id")
     @classmethod
@@ -97,6 +143,15 @@ class UploadMeta(DocMeta):
         if value in WINDOWS_RESERVED:
             raise ValueError("doc_id must not be a Windows device name")
         return value
+
+
+class NewWorkspace(Workspace):
+    """POST /workspaces 본문. 이름은 질문마다 시스템 프롬프트에 들어가므로 한 줄·길이 상한을 둔다.
+    저장하는 모양은 Workspace 그대로다."""
+
+    name: WorkspaceName
+    industry: Industry
+    roles: Annotated[dict[RoleName, list[Literal["public", "internal"]]], Field(max_length=50)]
 
 
 Question = Annotated[
@@ -123,9 +178,36 @@ class _LoadedIndex:
     chunks: int
 
 
+@functools.cache
+def _local_identity() -> tuple[str, str]:
+    """(홈 폴더, 사용자 이름). 알 수 없으면 빈 문자열."""
+    try:
+        home = str(Path.home())
+    except RuntimeError:
+        home = ""
+    try:
+        user = getpass.getuser()
+    except Exception:  # 환경 변수도 계정 DB도 없으면 OSError 등
+        user = ""
+    return home, user
+
+
 def _public_message(text: str) -> str:
-    """API 응답에 넣을 오류 메시지. 서버의 로컬 경로(사용자 이름이 들어 있다)를 지운다."""
-    return _LOCAL_PATH.sub("<path>", text)
+    """API 응답에 넣을 오류 메시지. 서버의 로컬 경로(사용자 이름이 들어 있다)를 지운다.
+
+    정규식은 공백에서 경로가 끝난다고 보므로 "C:\\Users\\John Doe\\..."는 "Doe\\..."가 남는다.
+    그래서 홈 폴더와 사용자 이름을 먼저 글자 그대로 지운다.
+    """
+    home, user = _local_identity()
+    if len(home) > 3:  # "C:\"·"/" 같은 루트는 지우지 않는다
+        for variant in {home, home.replace("\\", "/")}:
+            # 뒤에 경로 구분자·공백·끝이 와야 한다("C:\Users\hwan2"의 앞부분은 아니다)
+            pattern = re.escape(variant) + r"""(?![^\\/\s'"<>()])"""
+            text = re.sub(pattern, "~", text, flags=re.IGNORECASE)
+    text = _LOCAL_PATH.sub("<path>", text)
+    if len(user) >= 2:
+        text = re.sub(rf"(?<!\w){re.escape(user)}(?!\w)", "<user>", text, flags=re.IGNORECASE)
+    return text
 
 
 def _size_label(n: int) -> str:
@@ -157,7 +239,8 @@ def _write_json(path: Path, data: dict[str, Any]) -> None:
 def _copy_limited(source: BinaryIO, target: Path) -> tuple[int, str, bytes, bool]:
     """source를 target에 복사한다 → (크기, sha256, 앞부분, NUL 포함 여부).
 
-    상한은 Content-Length가 아니라 실제로 읽은 바이트로 검사한다(머리글은 거짓일 수 있다).
+    상한은 실제로 읽은 바이트로 검사한다. 파일 하나의 크기는 Content-Length로 알 수 없다
+    (머리글은 multipart 본문 전체의 크기이고, chunked 전송에는 아예 없다).
     """
     size = 0
     digest = hashlib.sha256()
@@ -185,25 +268,6 @@ def _signature_matches(suffix: str, head: bytes, has_nul: bool) -> bool:
     return not has_nul  # .txt·.md: 텍스트에는 NUL이 없다 (UTF-16·바이너리를 걸러낸다)
 
 
-def _check_parses(path: Path, meta: DocMeta, workspace_id: str) -> None:
-    """올린 파일을 실제로 읽어 본다. 깨졌거나 텍스트가 없으면 422 (색인 때가 아니라 지금 알린다)."""
-    try:
-        chunks = chunk_document(load_document(path, meta, workspace_id))
-    except Exception:
-        # pdfminer·zipfile·XML·문자 인코딩 오류 등 파서마다 예외가 다르다. 상세는 서버 로그에만
-        logger.warning("could not parse upload doc_id=%s", meta.doc_id, exc_info=True)
-        raise HTTPException(
-            422,
-            "문서를 읽을 수 없습니다. 파일이 깨졌거나 내용이 확장자와 맞지 않습니다 "
-            "(텍스트 파일은 UTF-8 또는 CP949)",
-        ) from None
-    if not chunks:
-        raise HTTPException(
-            422,
-            "문서에서 텍스트를 뽑을 수 없습니다. 스캔본(이미지) PDF는 아직 지원하지 않습니다",
-        )
-
-
 class _Service:
     """앱의 상태: 저장소, LLM, 임베더(지연 로딩), 워크스페이스별 색인 캐시와 잠금."""
 
@@ -212,9 +276,17 @@ class _Service:
         self.llm = llm if llm is not None else get_llm(settings)
         self._embed_model = settings.embed_model
         self._embedder = embedder
-        # 색인 정보에 남겨, 서버를 다시 켰을 때 같은 임베더인지 비교한다
-        self._embedder_name = settings.embed_model if embedder is None else type(embedder).__name__
+        # 색인 정보에 남겨, 서버를 다시 켰을 때 같은 임베더인지 비교한다. 넣어 준 임베더도 모델
+        # 이름이 있으면 그것을 쓴다(차원이 같은 다른 모델로 바꿔도 알아채게)
+        model_name = getattr(embedder, "model_name", None)
+        if embedder is None:
+            self._embedder_name = settings.embed_model
+        elif isinstance(model_name, str):
+            self._embedder_name = model_name
+        else:
+            self._embedder_name = type(embedder).__name__
         self._embedder_lock = threading.Lock()
+        self._parse_slots = threading.BoundedSemaphore(MAX_CONCURRENT_PARSES)
         self._guard = threading.Lock()
         # 워크스페이스마다 잠금 하나: 색인 만들기·다시 열기·검색·문서 등록을 차례로 한다.
         # Qdrant 로컬 모드는 같은 폴더를 한 클라이언트만 열 수 있고, 동시 접근에 안전하지 않다
@@ -262,6 +334,41 @@ class _Service:
 
     # ---- 문서 ----
 
+    def _parse(self, path: Path, meta: DocMeta, workspace_id: str) -> list[Chunk]:
+        """문서를 읽어 청크로 나눈다. 파싱은 메모리를 많이 쓸 수 있어 동시에 몇 개만 돌린다."""
+        with self._parse_slots:
+            return chunk_document(load_document(path, meta, workspace_id))
+
+    def _check_parses(self, path: Path, meta: DocMeta, workspace_id: str) -> None:
+        """올린 파일을 실제로 읽어 본다. 깨졌거나 텍스트가 없거나 너무 크면 422 (색인 때가 아니라
+        지금 알린다)."""
+        try:
+            chunks = self._parse(path, meta, workspace_id)
+        except DocumentTooLargeError:
+            logger.warning("upload expands too much doc_id=%s", meta.doc_id, exc_info=True)
+            raise HTTPException(
+                422, "문서를 풀어 낸 내용이 상한을 넘습니다(압축 폭탄으로 봅니다)"
+            ) from None
+        except Exception:
+            # pdfminer·zipfile·XML·문자 인코딩 오류 등 파서마다 예외가 다르다. 상세는 서버 로그에만
+            logger.warning("could not parse upload doc_id=%s", meta.doc_id, exc_info=True)
+            raise HTTPException(
+                422,
+                "문서를 읽을 수 없습니다. 파일이 깨졌거나 내용이 확장자와 맞지 않습니다 "
+                "(텍스트 파일은 UTF-8 또는 CP949)",
+            ) from None
+        if not chunks:
+            raise HTTPException(
+                422,
+                "문서에서 텍스트를 뽑을 수 없습니다. 스캔본(이미지) PDF는 아직 지원하지 않습니다",
+            )
+        if len(chunks) > MAX_CHUNKS_PER_DOCUMENT:
+            raise HTTPException(
+                422,
+                f"문서가 너무 깁니다(청크 {len(chunks):,}개, 상한 {MAX_CHUNKS_PER_DOCUMENT:,}개). "
+                "나눠서 올리세요",
+            )
+
     def add_document(self, ws: Workspace, meta: UploadMeta, upload: UploadFile) -> None:
         suffix = _client_suffix(upload.filename)
         if suffix not in SUPPORTED_SUFFIXES:
@@ -282,7 +389,7 @@ class _Service:
             if not _signature_matches(suffix, head, has_nul):
                 raise HTTPException(415, f"파일 내용이 {suffix} 형식이 아닙니다")
             stored = DocMeta(**meta.model_dump())
-            _check_parses(temp, stored, ws.id)
+            self._check_parses(temp, stored, ws.id)
             with self.lock(ws.id):
                 if record_path.exists():  # 같은 doc_id를 동시에 올린 경우
                     raise HTTPException(409, f"문서 '{meta.doc_id}'가 이미 있습니다")
@@ -314,7 +421,7 @@ class _Service:
             if meta.doc_id != record_path.stem or suffix not in SUPPORTED_SUFFIXES:
                 raise ValueError(f"inconsistent document record {record_path.name}")
             path = documents / f"{meta.doc_id}{suffix}"
-            chunks.extend(chunk_document(load_document(path, meta, workspace_id)))
+            chunks.extend(self._parse(path, meta, workspace_id))
             doc_ids.append(meta.doc_id)
         chunks.sort(key=_chunk_order)
         return chunks, sorted(doc_ids)
@@ -406,6 +513,9 @@ class _Service:
     # ---- 질문 ----
 
     def ask(self, ws: Workspace, request: AskRequest) -> AskResponse:
+        # 역할은 요청이 정한다: M-1은 인증이 없고 서버를 127.0.0.1에만 띄운다. 역할 필터는 인증이
+        # 아니다. 실제 배포에서는 인증 토큰의 클레임으로 역할을 정하고, 검색 단계 필터는 그대로
+        # 둔다(M-3)
         if request.role not in ws.roles:
             raise HTTPException(
                 400, f"알 수 없는 역할입니다. 가능한 역할: {', '.join(ws.roles) or '(없음)'}"
@@ -444,21 +554,25 @@ class _WorkspaceRetriever:
 
 
 class _BodySizeLimit:
-    """요청 본문 상한. 받은 바이트를 세다가 넘으면 413 (Content-Length는 믿지 않는다).
+    """요청 본문 상한. 받은 바이트를 세다가 넘으면 413. 업로드 경로만 큰 상한을 쓴다.
 
-    multipart는 FastAPI가 엔드포인트 전에 본문을 끝까지 읽어 임시 파일에 쌓으므로, 엔드포인트의
-    파일 크기 검사만으로는 거대한 본문이 디스크를 채우는 것을 막지 못한다. 여기서 던진
-    HTTPException은 FastAPI가 본문을 읽다 받은 그대로 다시 던져 413 응답이 된다.
+    Content-Length 머리글만 보지 않는 이유: chunked 전송에는 이 머리글이 없다. 또 multipart는
+    FastAPI가 엔드포인트 전에 본문을 끝까지 읽어 임시 파일에 쌓으므로, 엔드포인트의 파일 크기
+    검사만으로는 거대한 본문이 디스크를 채우는 것을 막지 못한다. 여기서 던진 HTTPException은
+    FastAPI가 본문을 읽다 받은 그대로 다시 던져 413 응답이 된다.
     """
 
-    def __init__(self, app: Any, max_bytes: int) -> None:
+    def __init__(self, app: Any, upload_bytes: int, other_bytes: int) -> None:
         self.app = app
-        self.max_bytes = max_bytes
+        self.upload_bytes = upload_bytes
+        self.other_bytes = other_bytes
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        upload = _UPLOAD_PATH.fullmatch(scope["path"]) is not None
+        max_bytes = self.upload_bytes if upload else self.other_bytes
         received = 0
 
         async def limited_receive() -> Any:
@@ -466,13 +580,38 @@ class _BodySizeLimit:
             message = await receive()
             if message["type"] == "http.request":
                 received += len(message.get("body", b""))
-                if received > self.max_bytes:
+                if received > max_bytes:
                     raise HTTPException(
-                        413, f"요청 본문이 상한({_size_label(self.max_bytes)})을 넘습니다"
+                        413, f"요청 본문이 상한({_size_label(max_bytes)})을 넘습니다"
                     )
             return message
 
         await self.app(scope, limited_receive, send)
+
+
+class _RejectCrossSite:
+    """브라우저가 다른 사이트의 페이지에서 보낸 상태 변경 요청(POST 등)을 403으로 막는다.
+
+    multipart 업로드와 본문 없는 POST는 preflight 없는 "단순 요청"이라, 악성 페이지가 사용자
+    브라우저를 시켜 127.0.0.1 서버에 문서를 심을 수 있다. 브라우저는 Sec-Fetch-Site 머리글을
+    붙이고 페이지 스크립트는 이 값을 바꿀 수 없다. curl·httpx 같은 브라우저 밖 클라이언트는
+    보내지 않으므로 통과한다. 정식 인증은 M-3.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD", "OPTIONS"):
+            site = dict(scope["headers"]).get(b"sec-fetch-site")
+            if site == b"cross-site":
+                response = JSONResponse(
+                    status_code=403,
+                    content={"detail": "다른 사이트에서 보낸 요청은 받지 않습니다"},
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
 
 
 def create_app(
@@ -492,7 +631,12 @@ def create_app(
 
     app = FastAPI(title="AX Assistant Builder", version="0.1.0", lifespan=lifespan)
     app.state.service = service
-    app.add_middleware(_BodySizeLimit, max_bytes=MAX_UPLOAD_BYTES + UPLOAD_OVERHEAD_BYTES)
+    app.add_middleware(
+        _BodySizeLimit,
+        upload_bytes=MAX_UPLOAD_BYTES + UPLOAD_OVERHEAD_BYTES,
+        other_bytes=MAX_JSON_BYTES,
+    )
+    app.add_middleware(_RejectCrossSite)  # 마지막에 더한 것이 바깥: 본문을 읽기 전에 거른다
 
     @app.exception_handler(LLMUnavailableError)
     async def _llm_unavailable(request: Request, exc: LLMUnavailableError) -> JSONResponse:
@@ -524,9 +668,9 @@ def create_app(
         return {"status": "ok"}
 
     @app.post("/workspaces", status_code=201)
-    def create_workspace(ws: Workspace) -> Workspace:
+    def create_workspace(ws: NewWorkspace) -> Workspace:
         try:
-            return service.store.create(ws)
+            return service.store.create(Workspace.model_validate(ws.model_dump()))
         except WorkspaceExistsError:
             raise HTTPException(409, f"워크스페이스 '{ws.id}'가 이미 있습니다") from None
 

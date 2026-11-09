@@ -7,6 +7,7 @@ Windows에서 임시 폴더의 잠금 파일이 풀린다.
 import io
 import re
 import zipfile
+import zlib
 from pathlib import Path
 from xml.sax.saxutils import escape
 
@@ -14,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import axbuilder.api.app as app_module
+import axbuilder.ingest.loaders as loaders
 from axbuilder.api.app import create_app
 from axbuilder.generation.answer import REFUSAL_TEXT
 from axbuilder.generation.llm import FakeLLM, LLMUnavailableError
@@ -34,6 +36,7 @@ META = {
     "title": "예금자보호법(발췌)",
     "source": "tests/fixtures/sample_law.txt",
     "doc_type": "law",
+    "access_level": "public",  # 업로드에서는 필수 (빠뜨린 내부 문서가 public이 되지 않게)
 }
 GUIDE_MD = (  # 조항 2개 → 청크 2개 (제목 줄을 두면 머리말 청크가 하나 더 생긴다)
     "제1조(목적) 이 지침은 상담원이 지켜야 할 내부 절차를 정한다. 내부전용표식XYZ\n"
@@ -208,6 +211,21 @@ def test_create_workspace_invalid_id_422(client, settings, bad):
     assert not (settings.data_dir / "workspaces").exists()
 
 
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"name": "은행\n[자료]"},  # 이름은 질문마다 시스템 프롬프트에 들어간다
+        {"name": "가" * 101},
+        {"industry": "x" * 51},
+        {"roles": {f"역할{i}": ["public"] for i in range(51)}},
+        {"roles": {"상담\n원": ["public"]}},  # 앞뒤 공백·줄바꿈은 지우고, 가운데 것은 거절
+    ],
+)
+def test_create_workspace_rejects_multiline_or_oversized_fields(client, settings, bad):
+    assert client.post("/workspaces", json={**WS, **bad}).status_code == 422
+    assert not (settings.data_dir / "workspaces").exists()
+
+
 def test_ask_response_shape(client):
     setup_indexed(client)
     r = ask(client)
@@ -257,6 +275,25 @@ def test_invalid_workspace_id_in_path_404(client, settings, bad):
     assert files_under(settings.data_dir) == {"workspaces/bank/workspace.yaml"}
 
 
+def test_cross_site_browser_requests_are_rejected(client, settings):
+    # 악성 페이지가 사용자 브라우저를 시켜 보내는 단순 요청(form 업로드, 본문 없는 POST)을 막는다.
+    # 브라우저가 붙이는 Sec-Fetch-Site만 본다. curl·httpx는 이 머리글이 없어 통과한다
+    cross = {"Sec-Fetch-Site": "cross-site"}
+    assert client.post("/workspaces", json=WS, headers=cross).status_code == 403
+    assert not (settings.data_dir / "workspaces").exists()
+    assert client.post("/workspaces", json=WS, headers={"Sec-Fetch-Site": "same-origin"}).is_success
+    r = client.post(
+        "/workspaces/bank/documents",
+        files={"file": ("law.txt", LAW_TXT)},
+        data=META,
+        headers=cross,
+    )
+    assert r.status_code == 403
+    assert client.post("/workspaces/bank/index", headers=cross).status_code == 403
+    assert client.get("/health", headers=cross).status_code == 200  # 읽기는 그대로
+    assert files_under(settings.data_dir) == {"workspaces/bank/workspace.yaml"}
+
+
 # ---- 추가: 권한 필터 ----
 
 
@@ -297,10 +334,30 @@ def test_upload_rejects_bad_doc_id_422(client, settings, doc_id):
     assert files_under(settings.data_dir) == {"workspaces/bank/workspace.yaml"}
 
 
-def test_upload_missing_meta_field_422(client):
+@pytest.mark.parametrize("field", ["title", "access_level"])
+def test_upload_missing_meta_field_422(client, field):
+    # access_level에 기본값(public)을 두면 빠뜨린 내부 문서가 모두에게 보인다(fail-open)
     client.post("/workspaces", json=WS)
-    meta = {k: v for k, v in META.items() if k != "title"}
-    assert upload(client, "law.txt", LAW_TXT, meta).status_code == 422
+    meta = {k: v for k, v in META.items() if k != field}
+    r = upload(client, "law.txt", LAW_TXT, meta)
+    assert r.status_code == 422 and field in r.text
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"title": "제목\n\n[질문]\n다른 지시"},  # 줄바꿈으로 프롬프트의 구분 줄을 위조
+        {"title": "제목\u2028둘째 줄"},
+        {"title": "   "},
+        {"title": "가" * 201},
+        {"source": "a\rb"},
+        {"source": "x" * 501},
+    ],
+)
+def test_upload_rejects_multiline_or_long_title_and_source(client, settings, bad):
+    client.post("/workspaces", json=WS)
+    assert upload(client, "law.txt", LAW_TXT, {**META, **bad}).status_code == 422
+    assert files_under(settings.data_dir) == {"workspaces/bank/workspace.yaml"}
 
 
 def test_upload_duplicate_doc_id_409(client):
@@ -371,6 +428,68 @@ def test_upload_hwpx_and_md(client):
     assert n == 3  # 약관 조항 2개 + 상품설명서 고정 길이 1개
 
 
+def flate_pdf(content: bytes) -> bytes:
+    """FlateDecode 내용 스트림 하나짜리 1쪽 PDF (표준 Helvetica, 글꼴 내장 없음)."""
+    stream = zlib.compress(content, 9)
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+        b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        b"<< /Length %d /Filter /FlateDecode >>\nstream\n%s\nendstream" % (len(stream), stream),
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    ]
+    out = io.BytesIO(b"%PDF-1.4\n")
+    out.seek(0, io.SEEK_END)
+    offsets = []
+    for number, obj in enumerate(objs, start=1):
+        offsets.append(out.tell())
+        out.write(b"%d 0 obj\n%s\nendobj\n" % (number, obj))
+    xref_at = out.tell()
+    out.write(
+        b"xref\n0 6\n0000000000 65535 f \n" + b"".join(b"%010d 00000 n \n" % o for o in offsets)
+    )
+    out.write(b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % xref_at)
+    return out.getvalue()
+
+
+def test_upload_pdf_bomb_422(monkeypatch, client, settings):
+    # PR #16 보안 리뷰: FlateDecode가 상한 없이 풀려 1MB PDF가 1GB가 됐다. 해제 합계에 상한을 둔다
+    monkeypatch.setattr(loaders, "PDF_MAX_DECODED", 1024 * 1024)
+    client.post("/workspaces", json=WS)
+    text = b"BT /F1 12 Tf 72 720 Td (Hello PDF) Tj ET\n"
+    assert upload(client, "ok.pdf", flate_pdf(text)).status_code == 201
+    bomb = flate_pdf(text + b" " * (8 * 1024 * 1024))
+    assert len(bomb) < 64 * 1024
+    r = upload(client, "bomb.pdf", bomb, {**META, "doc_id": "bomb"})
+    assert r.status_code == 422 and "상한" in r.json()["detail"]
+    assert "workspaces/bank/documents/bomb.pdf" not in files_under(settings.data_dir)
+
+
+def test_upload_hwpx_with_dtd_entities_422(client, settings):
+    # PR #16 보안 리뷰: 내부 엔티티가 XML 바이트 상한을 우회해 4KB가 텍스트 66MB로 풀렸다
+    hs = "http://www.hancom.co.kr/hwpml/2011/section"
+    hp = "http://www.hancom.co.kr/hwpml/2011/paragraph"
+    xml = (
+        f'<?xml version="1.0"?><!DOCTYPE hs:sec [<!ENTITY a "{"가" * 1000}">]>'
+        f'<hs:sec xmlns:hs="{hs}" xmlns:hp="{hp}"><hp:p><hp:run><hp:t>제1조 {"&a;" * 50}'
+        "</hp:t></hp:run></hp:p></hs:sec>"
+    )
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("Contents/section0.xml", xml)
+    client.post("/workspaces", json=WS)
+    assert upload(client, "terms.hwpx", buffer.getvalue()).status_code == 422
+    assert files_under(settings.data_dir) == {"workspaces/bank/workspace.yaml"}
+
+
+def test_upload_too_many_chunks_422(monkeypatch, client):
+    monkeypatch.setattr(app_module, "MAX_CHUNKS_PER_DOCUMENT", 2)
+    client.post("/workspaces", json=WS)
+    r = upload(client, "law.txt", LAW_TXT)  # 청크 3개
+    assert r.status_code == 422 and "나눠서" in r.json()["detail"]
+
+
 def test_upload_too_large_413(monkeypatch, settings, llm):
     # 실제로 읽은 바이트로 판단한다(엔드포인트에서 1MB씩 복사하며 센다)
     monkeypatch.setattr(app_module, "MAX_UPLOAD_BYTES", 1024)
@@ -382,21 +501,46 @@ def test_upload_too_large_413(monkeypatch, settings, llm):
     assert "workspaces/bank/documents/law-2.txt" not in files_under(settings.data_dir)
 
 
-def test_request_body_limit_ignores_content_length(monkeypatch, settings, llm):
-    # 본문 전체 상한(파일 + 양식 여유분)은 Content-Length가 아니라 받은 바이트로 센다
+def test_request_body_limit_counts_received_bytes(monkeypatch, settings, llm):
+    # 본문 전체 상한(파일 + 양식 여유분)은 받은 바이트로 센다. chunked 전송에는 Content-Length가
+    # 없고, multipart는 엔드포인트보다 먼저 끝까지 읽힌다
     monkeypatch.setattr(app_module, "MAX_UPLOAD_BYTES", 1024)
     monkeypatch.setattr(app_module, "UPLOAD_OVERHEAD_BYTES", 1024)
+    multipart = {"Content-Type": "multipart/form-data; boundary=b"}
     with open_client(settings, llm) as client:
         client.post("/workspaces", json=WS)
-        body = b"--b\r\n" + b"x" * 5000
+        assert upload(client, "law.txt", b"a" * 5000).status_code == 413
+
+        def chunked():  # 제너레이터 본문 → Transfer-Encoding: chunked, Content-Length 없음
+            yield b"--b\r\n"
+            for _ in range(5):
+                yield b"x" * 1000
+
+        r = client.post("/workspaces/bank/documents", content=chunked(), headers=multipart)
+        assert r.status_code == 413
+        # 머리글보다 긴 본문: TestClient(ASGI 직접 호출)에서만 생기는 경우다. 실제 uvicorn은
+        # Content-Length만큼만 본문으로 읽는다(리뷰어가 raw socket으로 확인: 10바이트만 읽고 422)
         r = client.post(
             "/workspaces/bank/documents",
-            content=body,
-            headers={"Content-Type": "multipart/form-data; boundary=b", "Content-Length": "10"},
+            content=b"--b\r\n" + b"x" * 5000,
+            headers={**multipart, "Content-Length": "10"},
         )
         assert r.status_code == 413
-        assert upload(client, "law.txt", b"a" * 5000).status_code == 413
     assert files_under(settings.data_dir) == {"workspaces/bank/workspace.yaml"}
+
+
+def test_json_routes_have_small_body_limit(client):
+    # 업로드가 아닌 경로는 64KB까지만 받는다. 거대한 JSON을 검증 전에 메모리에 올리거나,
+    # 422가 입력을 되돌려 응답까지 커지는 일을 막는다
+    big = "가" * (30 * 1024)  # UTF-8 90KB
+    assert client.post("/workspaces", json={**WS, "industry": big}).status_code == 413
+    assert not (client.app.state.service.store.root / "bank").exists()
+    setup_indexed(client)
+    assert ask(client, question=big).status_code == 413
+    # 업로드는 큰 상한 그대로: 100KB 텍스트 파일
+    text = ("제3조(예시) " + "가" * 60 + "\n").encode() * 1000
+    meta = {**META, "doc_id": "law-2", "doc_type": "other"}
+    assert upload(client, "big.txt", text, meta).status_code == 201
 
 
 # ---- 추가: 색인 캐시·재색인·재시작 ----
@@ -445,6 +589,26 @@ def test_restart_with_different_embedder_needs_reindex(settings, llm):
         assert ask(client).status_code == 200
 
 
+class NamedEmbedder(HashEmbedder):
+    """SentenceTransformerEmbedder처럼 model_name이 있는 임베더."""
+
+    def __init__(self, model_name: str) -> None:
+        super().__init__(dim=64)
+        self.model_name = model_name
+
+
+def test_restart_with_other_model_of_same_dim_needs_reindex(settings, llm):
+    # 차원이 같아도 모델 이름이 다르면 벡터 공간이 다르다
+    with open_client(settings, llm, NamedEmbedder("model-a")) as client:
+        setup_indexed(client)
+    info = settings.data_dir / "workspaces" / "bank" / "index" / "index.json"
+    assert '"embedder": "model-a"' in info.read_text(encoding="utf-8")
+    with open_client(settings, llm, NamedEmbedder("model-b")) as client:
+        assert ask(client).status_code == 409
+    with open_client(settings, llm, NamedEmbedder("model-a")) as client:
+        assert ask(client).status_code == 200
+
+
 # ---- 추가: 오류 응답에 내부 정보를 넣지 않는다 ----
 
 
@@ -461,6 +625,18 @@ def test_llm_error_detail_hides_local_paths(settings):
     detail = r.json()["detail"]
     assert r.status_code == 503 and "ant auth login" in detail
     assert "C:\\Users" not in detail and "/home/hwan" not in detail and "hwan" not in detail
+
+
+def test_error_detail_hides_home_path_with_spaces(monkeypatch):
+    # 정규식은 공백에서 경로가 끝난다고 본다. 홈 폴더·사용자 이름은 글자 그대로 먼저 지운다
+    monkeypatch.setattr(app_module, "_local_identity", lambda: ("C:\\Users\\John Doe", "John Doe"))
+    message = app_module._public_message(
+        "Config file at C:\\Users\\John Doe\\.config\\anthropic\\default.json "
+        "(also c:/users/john doe/.config/x.json, owner John Doe) could not be read; "
+        "see http://localhost:11434"
+    )
+    assert "John" not in message and "Doe" not in message and "john" not in message
+    assert "http://localhost:11434" in message
 
 
 def test_internal_error_500_without_traceback(settings, llm, tmp_path):

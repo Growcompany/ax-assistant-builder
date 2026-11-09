@@ -32,6 +32,7 @@ class SentenceTransformerEmbedder:
         # ml extra(torch)가 없는 CI에서도 이 모듈은 import돼야 하므로 여기서 import한다
         from sentence_transformers import SentenceTransformer
 
+        self.model_name = model_name  # API가 색인 정보에 남겨 재시작 후 같은 모델인지 비교한다
         self._model = SentenceTransformer(model_name, device=device)
         # 설치본(6.2.0)의 정식 이름은 get_embedding_dimension이고, 옛 이름
         # get_sentence_embedding_dimension은 FutureWarning을 낸다. 옛 이름만 있는 버전도 받는다
