@@ -216,10 +216,10 @@
 | 오케스트레이션 | 검색 코어는 **직접 구현**, 흐름은 **LangGraph** | 원리 설명 가능 + 공고 키워드 |
 | 벡터 저장소 | Qdrant (개발은 로컬 파일 모드, Compose에서는 서버). 워크스페이스별 컬렉션 | dense+sparse, Docker 없이 시작 가능 |
 | 형태소 분석 | Kiwi (`kiwipiepy`) + 워크스페이스별 사용자 사전 | 한국어 BM25 |
-| 임베딩 | bge-m3, KURE-v1, dragonkue/snowflake-arctic-embed-l-v2.0-ko 중 **실험으로 결정** | 한국어 상위권, 로컬 실행 |
-| 리랭커 | bge-reranker-v2-m3 계열 (한국어판 비교) | 로컬 GPU |
+| 임베딩 | 기본 dragonkue/snowflake-arctic-embed-l-v2.0-ko, 비교 bge-m3·KURE-v3 — **실험으로 최종 결정** | MTEB(kor) 검색 상위권, 로컬 실행 (`docs/research/11`) |
+| 리랭커 | KURE-Reranker-nano(0.6GB) 기본, bge-reranker-v2-m3 비교 | 8GB VRAM에 유리 |
 | 클라우드 LLM | 공식 Anthropic Python SDK. 기본 `claude-opus-5-5`, 비교·라우팅용으로 Sonnet 5.5·Haiku 5.5 | 사용자 요청 |
-| 로컬 LLM | Ollama + 7~8B 한국어 모델 | 8GB VRAM |
+| 로컬 LLM | Ollama + `qwen3.5:4b-q4_K_M` 기본, `qwen3.5:9b` 대안, EXAONE 3.5는 비교군만(비상업 라이선스) | 8GB VRAM, 공개 저장소 |
 | 설정 | 워크스페이스별 YAML (사람이 읽고 고칠 수 있게) | 자동 구성 결과 검토·버전 관리 |
 | 관측성 | 최소: 단계별 트레이스 JSONL. 가능하면 Langfuse 셀프호스팅 | 폐쇄망 동작 |
 | CI | GitHub Actions: 린트, 테스트, 검색 회귀 (API 호출 없음) | 기본 CI 존재 |
