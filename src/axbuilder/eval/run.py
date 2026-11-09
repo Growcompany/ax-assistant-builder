@@ -1,0 +1,473 @@
+"""평가 실행기: 골든셋으로 검색(과 답변)을 채점하고 보고서를 남긴다.
+
+사용:
+    python -m axbuilder.eval.run --workspace bank --retriever {bm25,dense,hybrid} --k 5 [--with-llm]
+결과는 reports/{workspace}/{YYYYmmdd-HHMM}-{retriever}.json에 저장하고 마크다운 표로 출력한다.
+원문은 미리 받아 두어야 한다(python scripts/download_corpus.py bank). --with-llm은 AXB_LLM_MODE를
+따른다(기본 local = Ollama). 색인은 메모리에만 만든다.
+"""
+
+import argparse
+import hashlib
+import itertools
+import math
+import statistics
+import subprocess
+import sys
+import time
+from datetime import datetime
+from pathlib import Path
+from typing import Any, get_args
+
+from pydantic import BaseModel, Field
+
+from axbuilder.corpus import CorpusSource, load_sources, source_file
+from axbuilder.eval.dataset import Evidence, GoldItem, QType, load_golden, validate_golden
+from axbuilder.eval.metrics import (
+    citation_precision,
+    matches,
+    recall_at_k,
+    reciprocal_rank,
+    refusal_correct,
+)
+from axbuilder.generation.answer import answer
+from axbuilder.generation.llm import LLMClient, LLMUnavailableError, get_llm
+from axbuilder.ingest.chunking import chunk_document
+from axbuilder.ingest.loaders import load_document
+from axbuilder.models import Answer, Chunk, ScoredChunk
+from axbuilder.retrieval.bm25 import BM25Index
+from axbuilder.retrieval.hybrid import RRF_K, HybridRetriever, Retriever
+from axbuilder.settings import Settings
+from axbuilder.workspace import Workspace, WorkspaceNotFoundError, WorkspaceStore
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+RETRIEVERS = ("bm25", "dense", "hybrid")
+# 골든셋에 내부 지침 근거가 있으므로 기본 역할은 public·internal을 모두 보는 역할이다
+DEFAULT_ROLE = "준법감시"
+# workspace.yaml이 아직 없을 때(Task 10 API 전) 쓰는 가상 은행 설정 (scripts/demo_answer.py와 같음)
+BANK_WORKSPACE = Workspace(
+    id="bank",
+    name="AXB은행(가상)",
+    industry="finance",
+    roles={"상담원": ["public"], "준법감시": ["public", "internal"]},
+)
+QTYPE_ORDER: tuple[str, ...] = get_args(QType)
+
+
+class EvalReport(BaseModel):
+    config: dict  # 실행 조건: 검색기, k, 역할, 모델, 커밋 등 (같은 조건으로 다시 돌릴 수 있게)
+    n: int  # 채점한 문항 수 (검색 지표만이면 out_of_scope 제외)
+    recall_at_k: float  # 근거가 있는 문항의 평균
+    mrr: float
+    citation_precision: float | None  # 인용이 하나라도 있는 문항의 평균. LLM 없이는 None
+    refusal_accuracy: float | None  # LLM 없이는 None
+    by_qtype: dict[str, dict[str, float]]  # qtype → {"n", 지표...} (잴 수 없는 지표는 빠짐)
+    items: list[dict]  # 문항별 기록: 검색 결과·적중 여부·답변·지연 (실패 사례 분석용)
+    # 계획의 Interfaces에 없는 필드: 색인·평가 시간과 질문당 지연(초·밀리초). 결과라 config와 나눈다
+    timing: dict[str, float] = Field(default_factory=dict)
+
+
+def run_eval(
+    items: list[GoldItem],
+    retriever: Retriever,
+    k: int,
+    llm: LLMClient | None,
+    workspace: Workspace,
+    role: str,
+) -> EvalReport:
+    """llm이 None이면 검색 지표만(out_of_scope 문항 제외), 있으면 answer()로 모든 문항에 답한다."""
+    if role not in workspace.roles:
+        raise ValueError(f"unknown role {role!r} for workspace {workspace.id!r}")
+    access_levels = list(workspace.roles[role])
+    # 범위 밖 문항은 근거가 없어 검색으로 채점할 수 없다. 답변 평가에서는 거절했는지를 본다
+    scored = items if llm is not None else [i for i in items if i.qtype != "out_of_scope"]
+    if not any(item.evidence for item in scored):
+        raise ValueError("no golden items with evidence to score")
+
+    records = []
+    started = time.perf_counter()
+    for item in scored:
+        t0 = time.perf_counter()
+        result: Answer | None = None
+        if llm is None:
+            # answer()와 같은 규칙: 볼 수 있는 등급이 없으면 검색하지 않는다
+            retrieved = (
+                retriever.search(item.question, k=k, access_levels=access_levels)
+                if access_levels
+                else []
+            )
+        else:
+            result = answer(item.question, retriever, llm, workspace, role, k=k)
+            retrieved = result.retrieved
+        latency_ms = (time.perf_counter() - t0) * 1000
+        records.append(_record(item, retrieved, k, result, latency_ms))
+    eval_seconds = time.perf_counter() - started
+
+    overall = summarize(records)
+    present = {r["qtype"] for r in records}
+    by_qtype = {
+        qtype: summarize([r for r in records if r["qtype"] == qtype])
+        for qtype in QTYPE_ORDER
+        if qtype in present
+    }
+    latencies = [r["latency_ms"] for r in records]
+    return EvalReport(
+        config={
+            "workspace": workspace.id,
+            "role": role,
+            "access_levels": access_levels,
+            "k": k,
+            "with_llm": llm is not None,
+            "golden_items": len(items),
+        },
+        n=len(records),
+        recall_at_k=overall["recall_at_k"],
+        mrr=overall["mrr"],
+        citation_precision=overall.get("citation_precision"),
+        refusal_accuracy=overall.get("refusal_accuracy"),
+        by_qtype=by_qtype,
+        items=records,
+        timing={
+            "eval_seconds": eval_seconds,
+            "mean_latency_ms": statistics.fmean(latencies),
+            "median_latency_ms": statistics.median(latencies),
+            "max_latency_ms": max(latencies),
+        },
+    )
+
+
+def _label(ev: Evidence) -> str:
+    parts = [ev.doc_id, ev.article, None if ev.page is None else f"p.{ev.page}"]
+    return " ".join(part for part in parts if part)
+
+
+def _record(
+    item: GoldItem,
+    retrieved: list[ScoredChunk],
+    k: int,
+    result: Answer | None,
+    latency_ms: float,
+) -> dict[str, Any]:
+    chunks = [s.chunk for s in retrieved][: max(k, 0)]
+    has_evidence = bool(item.evidence)
+    record: dict[str, Any] = {
+        "id": item.id,
+        "qtype": item.qtype,
+        "question": item.question,
+        "evidence": [_label(ev) for ev in item.evidence],
+        # 문서 단위 근거(article·page 없음)는 그 문서의 아무 청크나 맞아 지표가 후해진다
+        "doc_level_evidence": any(ev.article is None and ev.page is None for ev in item.evidence),
+        "retrieved": [
+            {
+                "chunk_id": s.chunk.chunk_id,
+                "doc_id": s.chunk.doc_id,
+                "article": s.chunk.article,
+                "page": s.chunk.page,
+                "score": s.score,
+                "hit": any(matches(s.chunk, ev) for ev in item.evidence),
+            }
+            for s in retrieved[: max(k, 0)]
+        ],
+        "recall_at_k": recall_at_k(chunks, item.evidence, k) if has_evidence else None,
+        "reciprocal_rank": reciprocal_rank(chunks, item.evidence) if has_evidence else None,
+        "latency_ms": latency_ms,
+    }
+    if result is not None:
+        record.update(
+            {
+                "refused": result.refused,
+                "refusal_correct": refusal_correct(result.refused, item.qtype),
+                "citations": [c.chunk_id for c in result.citations],
+                "citation_precision": citation_precision(result.citations, item.evidence),
+                "answer": result.text,
+                "llm": None if result.llm is None else result.llm.model_dump(),
+            }
+        )
+    return record
+
+
+# 요약 지표 이름 → 문항 기록의 키
+_SUMMARY_KEYS = {
+    "recall_at_k": "recall_at_k",
+    "mrr": "reciprocal_rank",
+    "citation_precision": "citation_precision",
+    "refusal_accuracy": "refusal_correct",
+}
+
+
+def summarize(records: list[dict[str, Any]]) -> dict[str, float]:
+    """문항 기록 묶음의 평균. 값이 있는 문항만 평균하고, 하나도 없으면 그 지표는 뺀다.
+
+    recall·mrr은 근거가 있는 문항, citation_precision은 인용이 있는 문항(범위 밖 문항에 인용을
+    달아 답했으면 0점으로 포함), refusal_accuracy는 답변을 받은 모든 문항이 대상이다.
+    """
+    summary: dict[str, float] = {"n": len(records)}
+    for name, key in _SUMMARY_KEYS.items():
+        values = [float(r[key]) for r in records if r.get(key) is not None]
+        if values:
+            summary[name] = math.fsum(values) / len(values)
+    return summary
+
+
+# ---- CLI ----
+
+
+def load_corpus_chunks(
+    sources_path: Path, raw_dir: Path, repo_root: Path, workspace_id: str
+) -> list[Chunk]:
+    """sources.yaml의 문서를 모두 읽어 청크로 나눈다. 하나라도 없으면 FileNotFoundError.
+
+    문서가 빠진 채 평가하면 그 문서를 근거로 한 문항이 오류 없이 0점이 되므로 멈춘다.
+    """
+    sources = load_sources(sources_path)
+    paths = {s.doc_id: source_file(s, raw_dir, repo_root) for s in sources}
+    missing = [f"{doc_id} ({path})" for doc_id, path in paths.items() if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            "missing documents: "
+            + ", ".join(missing)
+            + f"; run: python scripts/download_corpus.py {workspace_id}"
+        )
+    chunks: list[Chunk] = []
+    for source in sources:
+        doc = load_document(paths[source.doc_id], source.doc_meta(), workspace_id)
+        chunks.extend(chunk_document(doc))
+    return chunks
+
+
+def format_markdown(report: EvalReport) -> str:
+    """전체·qtype별·근거 단위별 표. 근거 단위별 행으로 문서 단위 근거의 부풀림을 본다."""
+    config = report.config
+    with_llm = bool(config.get("with_llm"))
+    k = config.get("k")
+    columns = ["구분", "n", f"Recall@{k}", "MRR"]
+    names = ["recall_at_k", "mrr"]
+    if with_llm:
+        columns += ["인용 정밀도", "거절 정확도"]
+        names += ["citation_precision", "refusal_accuracy"]
+
+    def row(label: str, summary: dict[str, float]) -> str:
+        cells = [label, str(int(summary["n"]))]
+        cells += [f"{summary[name]:.3f}" if name in summary else "-" for name in names]
+        return "| " + " | ".join(cells) + " |"
+
+    overall = {"n": report.n}
+    for name in names:
+        value = getattr(report, name)
+        if value is not None:
+            overall[name] = value
+    rows = [row("전체", overall)]
+    rows += [row(qtype, summary) for qtype, summary in report.by_qtype.items()]
+    article_only = [r for r in report.items if r["evidence"] and not r["doc_level_evidence"]]
+    doc_level = [r for r in report.items if r["doc_level_evidence"]]
+    if article_only:
+        rows.append(row("조항 단위 근거만", summarize(article_only)))
+    if doc_level:
+        rows.append(row("문서 단위 근거 포함", summarize(doc_level)))
+
+    levels = ", ".join(config.get("access_levels", []))
+    lines = [
+        f"### {config.get('workspace')} · {config.get('retriever', '?')} · k={k} · "
+        f"role={config.get('role')} ({levels})",
+        "",
+        "| " + " | ".join(columns) + " |",
+        "|" + "|".join("---" for _ in columns) + "|",
+        *rows,
+    ]
+    details = [
+        f"{key}={config[key]}"
+        for key in ("n_chunks", "embed_model", "llm_model", "commit")
+        if config.get(key) is not None
+    ]
+    if details:
+        lines += ["", " · ".join(details)]
+    if report.timing:
+        lines += ["", " · ".join(f"{key}={value:.2f}" for key, value in report.timing.items())]
+    return "\n".join(lines)
+
+
+def save_report(report: EvalReport, reports_dir: Path, retriever: str, now: datetime) -> Path:
+    """reports_dir/{YYYYmmdd-HHMM}-{retriever}.json에 저장한다.
+
+    같은 분에 같은 검색기로 다시 돌리면 덮어쓰지 않고 -2, -3을 붙인다.
+    """
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    stem = f"{now:%Y%m%d-%H%M}-{retriever}"
+    text = report.model_dump_json(indent=2) + "\n"
+    for number in itertools.count(1):
+        path = reports_dir / (f"{stem}.json" if number == 1 else f"{stem}-{number}.json")
+        try:
+            with path.open("x", encoding="utf-8", newline="\n") as f:
+                f.write(text)
+        except FileExistsError:
+            continue
+        return path
+    raise AssertionError("unreachable")
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _corpus_digest(sources: list[CorpusSource], raw_dir: Path, repo_root: Path) -> str:
+    """색인한 파일 전체의 지문. 원문을 다시 받아 내용이 바뀌면 값이 달라진다."""
+    digest = hashlib.sha256()
+    for source in sources:
+        file_hash = _sha256(source_file(source, raw_dir, repo_root))
+        digest.update(f"{source.doc_id}:{file_hash}\n".encode())
+    return digest.hexdigest()[:12]
+
+
+def _git_commit(repo_root: Path) -> str | None:
+    """코드 버전. 커밋하지 않은 변경이 있으면 -dirty를 붙인다."""
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(repo_root), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout.strip()
+        status = subprocess.run(
+            ["git", "-C", str(repo_root), "status", "--porcelain", "--untracked-files=no"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return head + ("-dirty" if status else "")
+
+
+def _load_workspace(store: WorkspaceStore, workspace_id: str) -> Workspace:
+    try:
+        return store.get(workspace_id)
+    except WorkspaceNotFoundError:
+        if workspace_id != BANK_WORKSPACE.id:
+            raise
+        return BANK_WORKSPACE
+
+
+def build_retriever(
+    kind: str, chunks: list[Chunk], embed_model: str
+) -> tuple[Retriever, dict[str, Any], dict[str, float]]:
+    """(검색기, 검색기 설정, {"model_load_seconds", "index_seconds"})."""
+    timing = {"model_load_seconds": 0.0, "index_seconds": 0.0}
+    bm25 = BM25Index()
+    params: dict[str, Any] = {}
+    if kind != "dense":
+        started = time.perf_counter()
+        bm25.build(chunks)
+        timing["index_seconds"] += time.perf_counter() - started
+        params.update({"bm25_k1": bm25.k1, "bm25_b": bm25.b})
+    if kind == "bm25":
+        return bm25, params, timing
+    # 모델·GPU가 필요한 import는 dense·hybrid일 때만
+    from axbuilder.retrieval.dense import DenseIndex, SentenceTransformerEmbedder
+
+    started = time.perf_counter()
+    embedder = SentenceTransformerEmbedder(embed_model)
+    timing["model_load_seconds"] = time.perf_counter() - started
+    started = time.perf_counter()
+    dense = DenseIndex(embedder, ":memory:", "eval")
+    dense.build(chunks)
+    timing["index_seconds"] += time.perf_counter() - started
+    params.update({"embed_model": embed_model, "embed_dim": embedder.dim})
+    if kind == "dense":
+        return dense, params, timing
+    hybrid = HybridRetriever(bm25, dense)
+    params.update({"rrf_k": RRF_K, "candidates": hybrid.candidates})
+    return hybrid, params, timing
+
+
+def main(argv: list[str] | None = None) -> int:
+    sys.stdout.reconfigure(encoding="utf-8")  # Windows 콘솔에서 한글이 깨지지 않게
+    parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
+    parser.add_argument("--workspace", default="bank")
+    parser.add_argument("--retriever", choices=RETRIEVERS, required=True)
+    parser.add_argument("--k", type=int, default=5)
+    parser.add_argument("--with-llm", action="store_true", help="answer()로 답변 지표까지")
+    parser.add_argument("--role", default=DEFAULT_ROLE)
+    parser.add_argument("--corpus-dir", type=Path, default=REPO_ROOT / "corpus")
+    parser.add_argument("--reports-dir", type=Path, default=Path("reports"))
+    args = parser.parse_args(argv)
+    if args.k < 1:
+        parser.error("--k must be >= 1")
+
+    started_at = datetime.now()
+    started = time.perf_counter()
+    settings = Settings.from_env()
+    store = WorkspaceStore(settings.data_dir / "workspaces")
+    workspace = _load_workspace(store, args.workspace)
+    if args.role not in workspace.roles:
+        parser.error(f"unknown role {args.role!r}; choose from {sorted(workspace.roles)}")
+
+    corpus_dir = args.corpus_dir / workspace.id
+    repo_root = args.corpus_dir.resolve().parent  # sources.yaml의 path는 저장소 루트 기준
+    raw_dir = store.path(workspace.id) / "raw"
+    golden_path = corpus_dir / "golden.jsonl"
+    items = load_golden(golden_path)
+    sources = load_sources(corpus_dir / "sources.yaml")
+    problems = validate_golden(items, {s.doc_id for s in sources})
+    if problems:
+        print("golden set problems:\n" + "\n".join(problems), file=sys.stderr)
+        return 1
+
+    t0 = time.perf_counter()
+    try:
+        chunks = load_corpus_chunks(corpus_dir / "sources.yaml", raw_dir, repo_root, workspace.id)
+    except FileNotFoundError as e:
+        print(e, file=sys.stderr)
+        return 1
+    load_seconds = time.perf_counter() - t0
+
+    retriever, params, build_timing = build_retriever(args.retriever, chunks, settings.embed_model)
+    # 첫 질문의 지연에 CUDA 초기화·Ollama 모델 적재 시간이 섞이지 않게 한 번 미리 부른다
+    t0 = time.perf_counter()
+    retriever.search("예금", k=1)
+    llm = get_llm(settings) if args.with_llm else None
+    try:
+        if llm is not None:
+            llm.generate("짧게 답하세요.", "안녕하세요", max_tokens=8)
+        warmup_seconds = time.perf_counter() - t0
+        report = run_eval(items, retriever, args.k, llm, workspace, args.role)
+    except LLMUnavailableError as e:
+        print(f"LLM unavailable: {e}", file=sys.stderr)
+        return 1
+
+    llm_model = None
+    if llm is not None:
+        llm_model = settings.claude_model if settings.llm_mode == "cloud" else settings.local_model
+    report.config.update(
+        {
+            "retriever": args.retriever,
+            "retriever_params": params,
+            "embed_model": params.get("embed_model"),
+            "llm_mode": settings.llm_mode if llm is not None else None,
+            "llm_model": llm_model,
+            "n_docs": len(sources),
+            "n_chunks": len(chunks),
+            "golden": golden_path.as_posix(),
+            "golden_sha256": _sha256(golden_path)[:12],
+            "corpus_sha256": _corpus_digest(sources, raw_dir, repo_root),
+            "commit": _git_commit(REPO_ROOT),
+            "started_at": started_at.isoformat(timespec="seconds"),
+        }
+    )
+    # 읽는 순서대로: 준비(읽기·모델·색인·예열) → 평가 → 전체
+    report.timing = {
+        "load_seconds": load_seconds,
+        **build_timing,
+        "warmup_seconds": warmup_seconds,
+        **report.timing,
+        "total_seconds": time.perf_counter() - started,
+    }
+    path = save_report(report, args.reports_dir / workspace.id, args.retriever, started_at)
+    print(format_markdown(report))
+    print(f"\nsaved: {path}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
