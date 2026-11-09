@@ -23,7 +23,10 @@ CLAUDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # SDK 기본값은 요청당 600초에 재시도 2번이고 시간 초과도 재시도하므로, 질문 하나가 최악
 # 30분 넘게 묶인다. /ask는 사람이 기다리는 요청이라 한 번에 120초(OllamaClient와 같은 값),
 # 재시도 1번(529·5xx·연결 오류처럼 금방 끝나는 일시 오류용)으로 최악 약 4분에 끝낸다.
-# 근거 청크 5개에 답하는 짧은 답은 이 안에 든다. 더 긴 답이 필요하면 스트리밍으로 바꾼다
+# 근거 청크 5개에 답하는 짧은 답은 이 안에 든다. 더 긴 답이 필요하면 스트리밍으로 바꾼다.
+# ClaudeClient 전체에 걸리므로 평가(run_eval --with-llm, cloud)도 같은 값을 쓴다. 평가는 첫
+# LLMUnavailableError에서 멈추므로, 생각이 긴 답 하나가 유료 50문항 실행을 중간에 끝낼 수 있다.
+# 첫 클라우드 평가(M-2) 전에 호출자별 timeout 인자나 스트리밍을 정한다
 # anthropic 2.x는 httpx2 기반이라 httpx.Timeout이 아니라 anthropic.Timeout을 쓴다
 CLAUDE_TIMEOUT = anthropic.Timeout(120.0, connect=5.0)
 CLAUDE_MAX_RETRIES = 1
