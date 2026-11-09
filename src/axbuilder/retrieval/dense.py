@@ -176,6 +176,23 @@ class DenseIndex:
         ).points
         return [ScoredChunk(chunk=Chunk(**p.payload), score=p.score) for p in points]
 
+    def chunks(self) -> list[Chunk]:
+        """색인에 들어 있는 청크 전부(순서는 정하지 않음). 컬렉션이 없으면 [].
+
+        폴더에 저장한 색인을 다시 열 때, 메모리에만 있는 BM25를 같은 청크로 다시 만드는 데 쓴다.
+        """
+        if not self._client.collection_exists(self.collection):
+            return []
+        result: list[Chunk] = []
+        offset = None
+        while True:
+            points, offset = self._client.scroll(
+                self.collection, limit=256, offset=offset, with_payload=True, with_vectors=False
+            )
+            result.extend(Chunk(**p.payload) for p in points)
+            if offset is None:
+                return result
+
     def close(self) -> None:
         """로컬 모드 폴더 잠금을 푼다. 같은 폴더를 다시 열기 전에 호출한다."""
         self._client.close()
