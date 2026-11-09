@@ -21,11 +21,14 @@ SYSTEM_PROMPT = """\
 CITATION = re.compile(r"\[([0-9]+(?:\s*,\s*[0-9]+)*)\]")
 # 거절 판정 때 무시하는 것: 공백, 따옴표, 백틱, 마크다운 굵게(**), 인용 표시 [n]
 _NOISE = re.compile(r"[\s\"'“”‘’`*]+")
+# 거절 판정용 인용 표시는 CITATION과 달리 유니코드 숫자(\d: 전각 '０', 아라비아 '٣')도 받는다.
+# 인용으로 매핑하지 않는 '[０]'도 내용은 아니므로, 그것만 있는 답은 거절이다
+_MARKER = re.compile(r"\[\d+(?:\s*,\s*\d+)*\]")
 _WORD = re.compile(r"\w")  # 글자·숫자(한글 포함)
 
 
 def _normalize(text: str) -> str:
-    return _NOISE.sub("", CITATION.sub("", text))
+    return _NOISE.sub("", _MARKER.sub("", text))
 
 
 # 끝의 마침표는 빼고 비교한다: "…없습니다!", "…없습니다。"도 거절이다
