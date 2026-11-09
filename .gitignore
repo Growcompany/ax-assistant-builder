@@ -42,3 +42,7 @@ Thumbs.db
 
 # Claude Code local settings (per-machine)
 .claude/settings.local.json
+.claude/worktrees/
+
+# ---- 평가 결과 (Task 9 CLI가 reports/{workspace}/에 쓴다) ----
+reports/
