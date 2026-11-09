@@ -1,34 +1,291 @@
-# RAG Portfolio Project
+# AX Assistant Builder
 
-> AI/LLM 엔지니어 직무 지원용 RAG(Retrieval-Augmented Generation) 프로젝트.
-> 주제와 아키텍처는 채용공고 조사 결과를 바탕으로 확정 예정 — [docs/research](docs/research/) 참고.
+**가상 은행 워크스페이스의 문서 13개(실제 법령·고시·약관 7개, 가상 문서 6개)로 조항을 인용해 답하고 근거가 없으면 거절하도록 만든 RAG 어시스턴트를 로컬 모델만으로 돌리고, 사람 검수 전 골든셋 50문항(근거가 있는 44문항)으로 검색을 재 보니 Recall@5가 dense 0.886, BM25+dense 하이브리드 0.864, BM25 0.841이었다.**
 
-## 개발 환경 세팅
+회사 문서를 올리면 그 회사 전용 어시스턴트(검색 → 인용 답변 → 거절)를 만들고, 평가 리포트까지 내는 플랫폼을 목표로 한다. 지금은 첫 버전(M-1)이다. 가상 은행 워크스페이스 한 곳에서 문서 파싱 → 하이브리드 검색 → 인용 답변 → 50문항 평가가 끝까지 돈다. 같은 흐름을 REST API로도 쓸 수 있다(API 업로드는 PDF·HWPX·TXT·MD). 학사 졸업 후 AI/AX 엔지니어 직무에 지원하려고 만드는 포트폴리오다.
+
+| 지금 되는 것 (M-1) | 아직 없는 것 |
+|---|---|
+| PDF·HWPX·HTML·MD 파싱, 조항 단위 분할 | 리랭커, 골든셋 150~200문항, LLM-judge (**M-2 예정**) |
+| Kiwi 형태소 BM25(직접 구현) + 한국어 dense + RRF | 에이전트(질의 분류·재검색·사람에게 넘기기), 개인정보 마스킹, 인증 (M-3 예정) |
+| 문서 등급별 권한 필터(검색 단계), 번호 인용, 고정 거절 문구 | Docker Compose 원커맨드 실행 (M-5 예정) |
+| 로컬 LLM(Ollama) / Claude 전환(Claude는 모의 테스트까지, 실제 호출은 M-2), 50문항 평가 CLI, FastAPI | Streamlit 화면, 데모 GIF (M-6 예정) |
+
+## 데모
+
+데모 GIF는 Streamlit 화면과 함께 M-6에 만든다. 지금은 API로 실제로 질문한 결과를 그대로 싣는다. 2026-11-10에 한 번 실행했고, [아래 실행 방법 5](#5-api-서버)의 코드로 다시 돌릴 수 있다. 다시 돌릴 때는 서버를 새 `AXB_DATA_DIR`로 띄우거나 `data/workspaces/demo/`를 지운다. 같은 id로 워크스페이스를 다시 만들면 409가 난다. 모델 출력은 실행마다 달라진다.
+
+워크스페이스에는 저장소에 있는 가상 문서 6개만 올렸다. 상품설명서 3개는 `public`, 내부 지침 3개는 `internal`이다. `상담원`은 public만, `준법감시`는 둘 다 볼 수 있다. 모델은 로컬 `qwen3.5:4b-q4_K_M`이다.
+
+| 역할 | 질문 | 시스템의 답 (요약) | 사람이 본 판정 |
+|---|---|---|---|
+| 상담원 | 든든 정기예금 12개월 만기일시지급식 기본금리는? | "연 2.55%입니다 [1]" — 정기예금 설명서 인용 | **오답.** 정답은 2.80%("12개월 이상 24개월 미만" 행)다. "12개월"이 든 바로 윗 행을 읽었다. 인용한 문서는 맞아서 인용 정밀도로는 잡히지 않는다 |
+| 상담원 | 고령 고객의 대리인이 예금을 찾을 때 필요한 서류는? | "제공된 자료로는 … 확인할 수 없습니다" + 상품설명서 2개 인용, `refused=false` | **권한 필터는 맞게 동작했다.** 답은 내부 지침에만 있어서 상담원의 검색 결과에 들어오지 않았고, 모델도 지어내지 않았다. 다만 정해진 거절 문구를 바꿔 말해서 시스템은 답변으로 셌고, 무관한 인용이 붙었다 |
+| 준법감시 | 같은 질문 | 위임장, 3개월 이내 인감 증명서 또는 본인 서명 사실 확인서, "대리인의 실명 확정 표시" [1: 고령 고객 응대 지침 제11조] + 초고령 고객 규정 [2] | **대체로 맞다.** 서류 3개와 근거 조항이 맞다. 다만 "실명확인증표"를 "실명 확정 표시"로 옮겼다. 덧붙인 초고령 고객 규정(제11조 ②)에는 엉뚱한 조항(상담 응대 지침 제4조)을 인용했다 |
+| 상담원 | AXB은행 신용카드 연회비는? | "제공된 자료로는 확인할 수 없습니다." `refused=true` | **맞다.** 자료에 없는 질문을 정해진 문구로 거절했다 |
+
+<details>
+<summary>실제 출력 전문</summary>
+
+```text
+{'chunks': 69}
+
+[상담원] AXB 든든 정기예금에 12개월 만기일시지급식으로 가입하면 기본금리는 몇 %인가요?
+refused=False
+AXB 든든 정기예금 12개월 만기 일시지급식의 기본금리는 연 2.55%입니다 [1].
+  [1] AXB 든든 정기예금 상품설명서
+
+[상담원] 고령 고객의 대리인이 예금을 찾으려면 어떤 서류가 필요한가요?
+refused=False
+제공된 자료로는 고령 고객의 대리인이 예금을 찾을 때 필요한 구체적인 서류는 확인할 수 없습니다. [1], [2]에는 적금 해지 시 증명 가능한 사유 (결혼, 출산, 주택 구입 등) 에 해당하는 증빙 서류가 나열되어 있으나, 대리인 접근 관련 서류나 고령 고객 우대 수수료 안내와 별개로 대리인의 자격이나 필요 서류에 대한 설명은 포함되어 있지 않습니다.
+  [1] AXB 자유로운 적금 상품설명서
+  [2] AXB 든든 정기예금 상품설명서
+
+[준법감시] 고령 고객의 대리인이 예금을 찾으려면 어떤 서류가 필요한가요?
+refused=False
+고령 고객의 대리인이 영업점에서 거래하려면 다음 각 호의 서류를 모두 제출해야 합니다.
+- 고객 본인이 서명하거나 인감을 날인한 위임장 [1].
+- 발급일부터 3 개월 이내인 고객의 인감 증명서 또는 본인 서명 사실 확인서 [1].
+- 대리인의 실명 확정 표시 [1].
+
+또한, 초고령 고객의 대리인이 1 천만원 이상의 출금이나 해지를 요청할 경우, 직원은 고객 본인에게 전화하여 위임 사실을 직접 확인한 뒤 처리하고, 확인되지 않으면 처리하지 아니합니다 [2].
+  [1] AXB은행(가상) 고령 고객 응대 지침 제11조
+  [2] AXB은행(가상) 상담 응대 지침 제4조
+
+[상담원] AXB은행 신용카드의 연회비는 얼마인가요?
+refused=True
+제공된 자료로는 확인할 수 없습니다.
+```
+
+</details>
+
+## 아키텍처
+
+```mermaid
+flowchart LR
+    subgraph WS["data/workspaces/{id}/ — 회사마다 분리, git 제외"]
+        RAW["원문<br/>PDF · HWPX · HTML · MD"]
+        IDX["Qdrant 로컬 파일"]
+    end
+    RAW --> CHUNK["로더 + 조항 단위 분할"]
+    CHUNK --> BM25["BM25<br/>Kiwi 형태소"]
+    CHUNK --> DENSE["dense 임베딩<br/>snowflake-arctic-ko"]
+    DENSE --> IDX
+    Q["질문 + 역할"] --> ACL["권한 필터<br/>역할 → 문서 등급"]
+    ACL --> BM25
+    ACL --> DENSE
+    BM25 --> RRF["RRF 융합<br/>k = 60"]
+    DENSE --> RRF
+    RRF --> ANS["answer()<br/>근거 5개 → 번호 인용"]
+    ANS --> LLM["LLMClient<br/>Ollama 기본 · Claude"]
+    LLM --> OUT["답변 + 조항 인용<br/>또는 거절"]
+    GOLD["골든셋 50문항"] --> EVAL["eval.run<br/>Recall@k · MRR<br/>인용 정밀도 · 거절 정확도"]
+    EVAL -.-> RRF
+    EVAL -.-> ANS
+```
+
+| 단계 | 구현 | 위치 |
+|---|---|---|
+| 파싱·분할 | PDF(pdfplumber), HWPX(표준 라이브러리 XML), 법령 HTML. "제N조"가 2개 이상이면 조항 단위, 아니면 800자 고정 길이 | `src/axbuilder/ingest/` |
+| 검색 | BM25와 RRF는 직접 구현. dense는 `dragonkue/snowflake-arctic-embed-l-v2.0-ko` + Qdrant(로컬 모드) | `src/axbuilder/retrieval/` |
+| 생성 | 근거 청크 5개만 보고 답하게 하는 프롬프트. 인용 번호를 다시 매기고, 범위 밖 번호는 지운다. 정해진 문구로 시작하면 거절 | `src/axbuilder/generation/` |
+| 평가 | 골든셋 검증, Recall@k·MRR·인용 정밀도·거절 정확도, 보고서 JSON | `src/axbuilder/eval/` |
+| API | 워크스페이스, 업로드(파일 이름·크기·형식 서명 검사, HWPX 해제량 상한·DTD 거부, PDF 해제량·쪽당 객체 수 상한. PDF 파싱 CPU 시간은 아직 못 묶음 → [한계](#한계)), 색인, 질문 | `src/axbuilder/api/` |
+
+## 핵심 결정 5개
+
+1. **모든 데이터를 회사(워크스페이스) 폴더 단위로 나눈다.** 컬렉션 하나에 회사 id 필터를 거는 방식은 필터를 한 번만 빠뜨려도 다른 회사 문서가 섞인다. → [ADR 0001](docs/adr/0001-workspace-isolation.md)
+2. **검색 코어(BM25·RRF)는 직접 구현하고, BM25와 dense를 RRF로 합친다.** 단, 첫 실험에서는 dense 단독이 더 좋았다. 기본값은 잠정으로 두고 M-2에서 다시 정한다. → [ADR 0002](docs/adr/0002-hybrid-rrf.md)
+3. **LLM은 `generate(system, user)` 프로토콜 하나 뒤에 두고, 기본값은 로컬(Ollama, qwen3.5 4B)이다.** 폐쇄망 고객을 기본으로 놓았다. 테스트는 가짜 LLM으로 네트워크 없이 돈다. → [ADR 0003](docs/adr/0003-llm-protocol-local-first.md)
+4. **권한은 생성이 아니라 검색 단계에서 거르고, 근거가 없으면 정해진 문구로 거절하게 한다.** 권한 밖 문서는 LLM 프롬프트에 아예 들어가지 않는다. → [Task 7 학습 노트](docs/learning/task-07-answer.md) (ADR은 M-2 예정)
+5. **골든셋은 "정답 + 근거 위치(조항)"로 만들고, 검색과 답변을 따로 잰다.** 검색은 근거 위치로(Recall@k·MRR), 답변은 인용과 거절로 채점한다. → [Task 8](docs/learning/task-08-golden-dataset.md)·[Task 9](docs/learning/task-09-eval-runner.md) 학습 노트 (ADR은 M-2 예정)
+
+## 결과 (M-1 기준선)
+
+출처: [`docs/experiments/2026-11-10-baseline.md`](docs/experiments/2026-11-10-baseline.md). 설정, 재현 명령, 실패 사례, 시간이 모두 그 문서에 있다.
+
+**조건**: 골든셋 v0 50문항(lookup 30, table 8, multi_doc 6, out_of_scope 6). 에이전트가 문서를 보고 만든 초안이고 **사람 검수 전**이다(15문항 표본 검수 대기). 코퍼스는 13개 문서, 945청크다. 역할은 `준법감시`(public + internal), k = 5다.
+
+**검색** (범위 밖 6문항을 뺀 44문항)
+
+| 구분 | n | BM25 R@5 | BM25 MRR | dense R@5 | dense MRR | hybrid R@5 | hybrid MRR |
+|---|---|---|---|---|---|---|---|
+| **전체** | 44 | 0.841 | 0.746 | **0.886** | **0.880** | 0.864 | 0.824 |
+| 조항 단위 근거만 | 25 | 0.780 | 0.653 | 0.820 | 0.808 | 0.800 | 0.710 |
+| 문서 단위 근거 포함 | 19 | 0.921 | 0.868 | 0.974 | 0.974 | 0.947 | 0.974 |
+
+**답변** (hybrid + `qwen3.5:4b-q4_K_M`, 50문항, 한 번 실행)
+
+| 구분 | n | 근거 n | Recall@5 | MRR | 인용 n | 인용 정밀도 | 거절 정확도 |
+|---|---|---|---|---|---|---|---|
+| **전체** | 50 | 44 | 0.864 | 0.824 | 39 | 0.662 | 0.860 |
+| out_of_scope | 6 | 0 | - | - | 1 | 0.000 | 0.333 |
+
+**읽을 때 주의할 점**
+
+- **dense가 hybrid보다 좋았다.** 하이브리드가 늘 낫다는 가정과 반대다. RRF는 두 검색기 모두에 나온 청크를 우선한다. 그래서 두 후보 목록(각 30개)에 함께 나온 청크가 5개 이상이면, BM25 후보에 없는 정답은 dense가 1위로 찾아도 상위 5개에 들지 못한다(bank-029). 반대로 dense가 놓치고 hybrid가 찾은 문항도 있다(bank-009). 다만 Recall@5 차이는 **한 문항**이다. 44문항에서 한 문항은 약 0.023이라 순위는 바뀔 수 있다. → [ADR 0002](docs/adr/0002-hybrid-rrf.md)
+- **문서 단위 근거가 Recall을 부풀린다.** 상품설명서는 조항이 없어 근거를 문서 단위로 달았다. 그래서 그 문서의 청크 6개 중 아무거나 나와도 정답이다. 반면 조항 근거는 예컨대 은행법 청크 256개 중 1개만 정답이다. 조항 근거만 있는 25문항의 R@5는 0.780 / 0.820 / 0.800으로, 전체 수치보다 낮다. "조항을 정확히 찾는 능력"은 이 행으로 읽어야 한다.
+- **거절 판정이 바꿔 말한 거절을 놓친다.** 판정은 "답이 정해진 문구(`제공된 자료로는 확인할 수 없습니다.`)로 시작하는가"라는 글자 규칙이다. 범위 밖 6문항 중 4개는 모델이 문구를 바꿔 거절했고, 지표는 이것을 답변으로 셌다(0.333). 사람이 읽어 보면 6문항 모두 답을 피했다. 반대로 근거를 가져왔는데 거절한 과잉 거절이 3/39다. out_of_scope 행의 인용 정밀도 0.000은 인용을 단 1문항(046)의 값이다.
+- **답변 지표는 한 번 실행한 값이다.** 같은 설정의 다른 실행에서는 인용 정밀도가 0.707이었다. 인용 정밀도는 위치만 본다. 그래서 맞는 조항을 인용하고 내용을 틀리게 옮긴 답(bank-030)은 잡지 못한다.
+- 시간: 답변 지연은 중앙값 4,358.52 ms, 평균 6,988.64 ms, 최대 68,855.43 ms다. 검색만 하면 질문당 평균 dense 30.81 ms, BM25 0.84 ms다(RTX 3070 Ti 8GB).
+
+## 실행 방법
+
+확인한 환경은 Windows 11 + Git Bash, Python 3.13, RTX 3070 Ti 8GB다. CI(GitHub Actions, Ubuntu)는 1번만 돌린다.
+
+### 1. 설치와 단위 테스트 (네트워크·GPU·모델 없이)
 
 ```bash
+git clone https://github.com/Growcompany/ax-assistant-builder.git
+cd ax-assistant-builder
 python -m venv .venv
-# Windows (Git Bash): source .venv/Scripts/activate
-# Windows (PowerShell): .venv\Scripts\Activate.ps1
-# macOS/Linux: source .venv/bin/activate
-pip install -e ".[dev]"
-cp .env.example .env   # API 키 등 채우기
+source .venv/bin/activate          # Windows Git Bash: source .venv/Scripts/activate
+                                   # Windows PowerShell: .venv\Scripts\Activate.ps1
+pip install -e ".[dev]"            # ¹
+pytest -q                          # 실제 모델·네트워크를 쓰는 테스트(slow)는 빠진다
 ```
 
-## 자주 쓰는 명령
+### 2. 코퍼스 받기와 BM25 평가 (GPU 없이)
 
 ```bash
-pytest -q             # 테스트
-ruff check .          # 린트
-ruff format .         # 포맷
+python scripts/download_corpus.py bank     # 법령·고시 5개(국가법령정보센터), 표준약관 2개(공정위)를 받는다
+python -m axbuilder.eval.run --workspace bank --retriever bm25 --k 5
 ```
 
-## 폴더 구조
+원문은 `data/workspaces/bank/raw/`에 저장된다(git 제외). 가상 문서 6개는 저장소에 있다. 평가 결과는 표로 출력되고, `reports/bank/`에 JSON으로 남는다.
 
+### 3. dense·hybrid 평가 (임베딩 모델, GPU 권장)
+
+```bash
+# PyTorch를 먼저 환경에 맞게 설치한다 (https://pytorch.org). 아래는 확인한 환경(Windows, CUDA)의 명령이다
+pip install torch==2.15.0 --index-url https://download.pytorch.org/whl/cu132
+pip install -e ".[ml]"                     # sentence-transformers
+python -m axbuilder.eval.run --workspace bank --retriever hybrid --k 5
 ```
-src/axbuilder/    # 애플리케이션 코드
-tests/            # 테스트
-data/raw/         # 원본 문서 (git 제외)
-data/processed/   # 전처리 결과 (git 제외)
-docs/             # 설계 문서, 조사 자료, 실험 기록
-.github/workflows # CI (lint + test)
+
+첫 실행 때 임베딩 모델(Hugging Face 캐시 기준 약 2.2GB)을 받는다. torch 없이 `.[ml]`부터 설치하면 pip가 PyPI의 torch를 가져온다. Windows에서는 이것이 CPU용이다.
+
+### 4. 로컬 LLM으로 답변까지 평가
+
+```bash
+# Ollama 설치: https://ollama.com
+ollama pull qwen3.5:4b-q4_K_M
+python -m axbuilder.eval.run --workspace bank --retriever hybrid --k 5 --with-llm   # 50문항, 확인한 PC에서 3~7분
 ```
+
+Claude로 바꾸려면 `AXB_LLM_MODE=cloud`와 `ANTHROPIC_API_KEY`를 설정하고 `--allow-cloud`를 더한다. 문항마다 유료 API를 부른다. 다른 설정은 [`.env.example`](.env.example)에 있다.
+
+### 5. API 서버
+
+```bash
+uvicorn axbuilder.api.main:app     # http://127.0.0.1:8000/docs 에서 바로 호출해 볼 수 있다
+```
+
+| 메서드 | 경로 | 하는 일 |
+|---|---|---|
+| POST | `/workspaces` | 워크스페이스(이름, 역할 → 문서 등급) 만들기 |
+| POST | `/workspaces/{id}/documents` | 문서 업로드: PDF·HWPX·TXT·MD, 50MB까지. `access_level` 필수 |
+| POST | `/workspaces/{id}/index` | BM25 + dense 색인 |
+| POST | `/workspaces/{id}/ask` | `{"question", "role"}` → `{"answer", "citations", "refused", "latency_ms"}` |
+
+<details>
+<summary>위 "데모"를 만든 코드 (저장소 루트에서 파일로 저장해 실행, 서버와 Ollama가 켜져 있어야 함. 다시 돌릴 때는 새 AXB_DATA_DIR로 서버를 띄우거나 data/workspaces/demo/를 지운다)</summary>
+
+```python
+import sys
+from pathlib import Path
+
+import httpx
+
+from axbuilder.corpus import load_sources
+
+sys.stdout.reconfigure(encoding="utf-8")  # Windows 콘솔에서 한글이 깨지지 않게
+api = httpx.Client(base_url="http://127.0.0.1:8000", timeout=300)
+
+# 1) 워크스페이스: 역할마다 볼 수 있는 문서 등급
+api.post(
+    "/workspaces",
+    json={
+        "id": "demo",
+        "name": "AXB은행(가상)",
+        "industry": "finance",
+        "roles": {"상담원": ["public"], "준법감시": ["public", "internal"]},
+    },
+).raise_for_status()
+
+# 2) 저장소에 있는 가상 문서 6개 업로드: 상품설명서 3개(public), 내부 지침 3개(internal)
+fields = {"doc_id", "title", "source", "doc_type", "access_level"}
+for s in load_sources(Path("corpus/bank/sources.yaml")):
+    if s.path:  # url로 받는 법령·약관은 건너뛴다
+        with open(s.path, "rb") as f:
+            api.post(
+                "/workspaces/demo/documents",
+                data=s.model_dump(include=fields),
+                files={"file": (Path(s.path).name, f)},
+            ).raise_for_status()
+
+# 3) 색인: BM25 + dense (첫 호출 때 임베딩 모델을 불러온다)
+print(api.post("/workspaces/demo/index").json())
+
+# 4) 질문: 역할이 다르면 검색되는 문서가 다르다
+for role, question in [
+    ("상담원", "AXB 든든 정기예금에 12개월 만기일시지급식으로 가입하면 기본금리는 몇 %인가요?"),
+    ("상담원", "고령 고객의 대리인이 예금을 찾으려면 어떤 서류가 필요한가요?"),
+    ("준법감시", "고령 고객의 대리인이 예금을 찾으려면 어떤 서류가 필요한가요?"),
+    ("상담원", "AXB은행 신용카드의 연회비는 얼마인가요?"),
+]:
+    r = api.post("/workspaces/demo/ask", json={"question": question, "role": role}).json()
+    print(f"\n[{role}] {question}\nrefused={r['refused']}\n{r['answer']}")
+    for i, c in enumerate(r["citations"], 1):
+        print(f"  [{i}] {c['title']} {c['article'] or ''}")
+```
+
+</details>
+
+¹ 이 저장소를 만든 PC는 시스템 pip 설정에 응답하지 않는 미러가 있다. 그래서 `PIP_CONFIG_FILE=nul pip install …`로 설정 파일을 무시했다. 보통은 필요 없다.
+
+## 한계
+
+- **평가가 작고 검수 전이다.** 골든셋은 50문항이고 사람 검수 전이다. 문서를 보고 만들어서, 50문항 중 12개는 원문 문장을 바꿔 쓴 질문이다(BM25에 유리). 조항 번호로 묻는 질문은 없다. 역할은 `준법감시` 하나로만 쟀다.
+- **지표가 못 재는 것이 있다.** 거절 판정은 글자 규칙이고, 인용 정밀도는 위치만 본다. 내용이 틀린 답은 M-2의 답변 채점(LLM-judge + 사람 채점)으로 잡아야 한다.
+- **4B 로컬 모델의 한계.** 표의 행을 잘못 읽는다(데모의 2.55%). 정해진 거절 문구를 지키지 않고, 그 거절에 무관한 인용을 달기도 한다.
+- **검색.** 리랭커가 아직 없다. 청크의 41%가 부칙이라 잡음이 된다. 긴 조항(최대 11,452자)을 더 나누지 않는다.
+- **보안.**
+  - 역할은 요청이 정하므로 인증이 아니다. 그래서 서버는 127.0.0.1에서만 띄워야 한다(`--host 0.0.0.0` 금지). 코드가 막지는 않는다. uvicorn 기본값이 127.0.0.1일 뿐이다.
+  - 업로드는 파일 이름(경로 조작), 크기(50MB), 형식 서명을 검사한다. 파싱하며 풀리는 양은 세 가지로 막는다.
+    - HWPX: 구역 압축 해제 합계를 50MB로 묶고, 구역 XML의 DTD(엔티티 확장)는 거부한다.
+    - PDF 스트림: 해제량을 문서당 256MB로 묶는다.
+    - PDF 레이아웃 객체(글자·선·그림): 쪽당 10만 개, 문서당 1천만 개로 묶는다. pdfplumber가 글자마다 약 2KB짜리 객체를 만들어서, Task 10 2차 리뷰에서 1.5KB PDF가 업로드 검사를 통과하며(201) 약 38초, 0.8GB를 썼기 때문이다. 상한을 둔 뒤 같은 종류의 1KB PDF는 2.4초, 최대 메모리 약 60MB에서 422가 된다. 상한 직전 쪽 하나는 약 194MB·2.2초를 쓴다.
+  - **PDF 파싱의 CPU 시간은 아직 묶지 않았다.** 문서 상한까지 가는 PDF는 최악 약 4분 동안 파싱 자리(동시 2개) 하나를 잡는다. 순수 파이썬 디코더(CCITT)의 CPU 시간도 막지 못한다. 파싱을 메모리·시간 상한이 있는 별도 프로세스로 옮기는 일은 M-3에서 한다.
+  - 개인정보 마스킹, 감사 로그, 프롬프트 인젝션 방어도 M-3에서 만든다.
+- **범위.** API 업로드 형식은 PDF·HWPX·TXT·MD다. 법령 HTML은 다운로드 스크립트가 조문 텍스트로 바꿔 `.txt`로 저장한다. API 업로드로는 HTML을 받지 않는다. DOCX·XLSX는 아직 없다. 시행일 메타데이터는 저장만 하고 검색에 쓰지 않는다. 구버전 문서 처리는 아직 없다.
+- **운영.** Qdrant 로컬 모드라 서버 프로세스는 하나만 띄울 수 있다. "local 모드에서 외부 호출 0건"은 아직 테스트로 보장하지 않는다(M-5). 로컬 모델 경로(임베딩·Ollama)는 위 PC 한 대에서만 확인했다. Claude 경로는 SDK를 흉내 낸 단위 테스트만 있고, 실제 API는 한 번도 부르지 않았다(유료라서 M-2 모델 비교 때 사용자 승인 후 부른다).
+
+## 데이터와 라이선스
+
+| 자료 | 처리 | 이유 |
+|---|---|---|
+| 법령 4개, 전자금융감독규정(고시) | 원문을 커밋하지 않고 `scripts/download_corpus.py`로 받는다 | 저작권법 제7조(법령·고시)로 보호받지 않는 저작물이다. 그래도 원문을 저장소에 쌓지 않고, 출처 목록(`corpus/bank/sources.yaml`: URL, 시행일, 공포번호)과 스크립트만 둔다. 출처: 국가법령정보센터(법제처) |
+| 공정위 표준약관 2개(HWPX) | 커밋하지 않고 스크립트로만 받는다 | 게시물에 공공누리 표시가 없고, 공정위 저작권정책상 사전 협의 대상이다. 재배포 권리가 불명확하다 |
+| 상품설명서 3개, 내부 지침 3개 | 이 프로젝트용으로 새로 쓴 가상 문서(에이전트 작성)를 커밋한다(`corpus/bank/synthetic/`, `corpus/bank/internal/`) | 실제 은행 상품설명서는 은행의 저작물이라 쓰지 않았다. **AXB은행(가상)** 은 실존하지 않으며, 금리·수수료는 가상 수치다 |
+| 골든셋 `corpus/bank/golden.jsonl` | 커밋한다 | 질문, 정답, 근거 위치만 있고 원문은 없다 |
+
+출처별 판단 근거는 [`docs/research/12-example-data-sources.md`](docs/research/12-example-data-sources.md)에 있다. 이 저장소 코드의 라이선스는 아직 정하지 않았다.
+
+## 개발 방식: AI 에이전트가 구현하고 사람이 방향과 검수를 맡는다
+
+- **구현**: Claude Code 에이전트가 계획 문서의 작업 하나를 브랜치 하나, PR 하나로 구현한다. 계획에 적힌 테스트가 완료 조건이다(TDD).
+- **리뷰**: 구현 에이전트와 다른 리뷰 에이전트가 PR마다 정확성, 계획 위반, 보안을 본다. 지적과 대응은 [PR 기록](https://github.com/Growcompany/ax-assistant-builder/pulls?q=is%3Apr)에 남는다. 예를 들어 Task 10 보안 리뷰에서 4.6KB HWPX가 XML 엔티티 확장(billion laughs류)으로 텍스트 66MB가 되는 공격을 찾아 막았다. 2차 리뷰가 찾은 PDF 글자 폭탄(1.5KB → 0.8GB)은 쪽당 객체 수 상한으로 막았다. PDF 파싱 CPU 시간은 아직 열려 있다(위 한계).
+- **사람(저장소 주인)**: 방향과 우선순위를 정하고, 설치와 비용을 승인하고, 골든셋을 검수한다(표본 15문항 대기 중). 작업마다 남긴 [학습 노트](docs/learning/)로 코드를 이해하고 면접에서 설명한다.
+- **검증**: CI가 `ruff`와 `pytest`를 네트워크·GPU 없이 돌린다. 실제 모델은 `@pytest.mark.slow` 테스트와 수동 실행으로 확인한다. 실험 기록에는 재현 명령, 커밋, 데이터 지문을 적는다.
+
+## 문서 지도
+
+| 문서 | 내용 |
+|---|---|
+| [설계](docs/superpowers/specs/2026-11-09-company-assistant-builder-design.md) | 무엇을·왜: 범위, 로드맵 M-1~M-6, 위험 |
+| [M-1 계획](docs/superpowers/plans/2026-11-09-m1-thin-e2e.md) | 어떻게: 작업 0~11, 인터페이스, 완료 조건 테스트 |
+| [ADR](docs/adr/) | 결정 기록 3개 |
+| [실험 기록](docs/experiments/) | 기준선 수치, 실패 사례, 재현 방법 |
+| [학습 노트](docs/learning/) | 작업마다 핵심 개념, 대안 비교, 면접 예상 질문 |
+| [조사](docs/research/) | 채용 공고 분석, 한국어 RAG 스택, 데이터 출처 |
