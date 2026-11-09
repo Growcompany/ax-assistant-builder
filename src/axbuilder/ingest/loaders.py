@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pdfplumber
 
+from axbuilder.ingest.pdf_guard import decode_budget, hit_decode_limit
 from axbuilder.models import DocMeta, Document, Page
 
 logger = logging.getLogger(__name__)
@@ -25,6 +26,9 @@ HWPX_READ_CHUNK = 1024 * 1024
 # zipfile은 deflate는 요청한 양까지만 풀지만 bzip2·lzma는 한 번에 풀 양의 상한이 없다.
 # 한컴오피스는 구역을 deflate로 저장한다
 HWPX_COMPRESSIONS = {zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED}
+# PDF 하나에서 pdfminer가 스트림을 풀어 낸 바이트 합계의 상한 (압축 폭탄 방지, pdf_guard).
+# 텍스트 위주 4천 쪽 매뉴얼의 처음 150쪽이 약 3MB로 풀렸다. 실제 문서에는 넉넉하다
+PDF_MAX_DECODED = 256 * 1024 * 1024
 _HP = "{http://www.hancom.co.kr/hwpml/2011/paragraph}"
 # hp:t 안에서 글자 대신 쓰이는 공백류 요소 (탭, 전각 공백, 줄 안 줄바꿈 등)
 _HP_SPACES = {f"{_HP}{name}" for name in ("tab", "fwSpace", "nbSpace", "lineBreak")}
@@ -32,6 +36,22 @@ _HP_SPACES = {f"{_HP}{name}" for name in ("tab", "fwSpace", "nbSpace", "lineBrea
 
 class UnsupportedFileType(ValueError):
     """지원하지 않는 확장자 (API에서는 415로 바꾼다)."""
+
+
+class DocumentTooLargeError(ValueError):
+    """풀어 낸 내용이 상한을 넘는다 (압축 폭탄으로 본다. API에서는 422)."""
+
+
+class _RejectDTD(ET.TreeBuilder):
+    """DTD(<!DOCTYPE>)가 나오면 파싱을 멈춘다.
+
+    내부 엔티티(<!ENTITY a "...">를 정의하고 &a;를 반복)는 XML 바이트 상한을 우회해 수십~수백 배로
+    풀린다. expat의 billion laughs 방어도 100배까지는 허용한다. 한컴오피스가 만든 구역 XML에는
+    DTD가 없으므로 아예 받지 않는다. 엔티티를 정의하기 전, 문서 머리에서 멈춘다.
+    """
+
+    def doctype(self, name: str, pubid: str | None, system: str | None) -> None:
+        raise ValueError("DTD (<!DOCTYPE>) is not allowed in HWPX section XML")
 
 
 def load_document(path: Path, meta: DocMeta, workspace_id: str) -> Document:
@@ -53,11 +73,19 @@ def load_document(path: Path, meta: DocMeta, workspace_id: str) -> Document:
 
 def _read_pdf(path: Path) -> list[Page]:
     pages = []
-    with pdfplumber.open(path) as pdf:
-        for pdf_page in pdf.pages:
-            text = pdf_page.extract_text() or ""
-            pages.append(Page(number=pdf_page.page_number, text=_normalize(text)))
-            pdf_page.close()  # 페이지별 글자 캐시를 비워 수백 쪽 PDF에서도 메모리가 쌓이지 않게
+    try:
+        with decode_budget(PDF_MAX_DECODED), pdfplumber.open(path) as pdf:
+            for pdf_page in pdf.pages:
+                text = pdf_page.extract_text() or ""
+                pages.append(Page(number=pdf_page.page_number, text=_normalize(text)))
+                # 페이지별 글자 캐시를 비워 수백 쪽 PDF에서도 메모리가 쌓이지 않게
+                pdf_page.close()
+    except Exception as e:
+        if not hit_decode_limit(e):
+            raise
+        raise DocumentTooLargeError(
+            f"{path.name}: PDF streams expand to more than {PDF_MAX_DECODED // (1024 * 1024)}MB"
+        ) from e
     return pages
 
 
@@ -81,12 +109,12 @@ def _read_hwpx(path: Path) -> str:
                         f"{path.name}: {info.filename} uses unsupported compression "
                         f"{info.compress_type} (only stored or deflate)"
                     )
-                parser = ET.XMLParser()
+                parser = ET.XMLParser(target=_RejectDTD())
                 with zf.open(info) as member:
                     while chunk := member.read(HWPX_READ_CHUNK):
                         read += len(chunk)
                         if read > HWPX_MAX_UNCOMPRESSED:
-                            raise ValueError(
+                            raise DocumentTooLargeError(
                                 f"{path.name}: sections expand to more than "
                                 f"{HWPX_MAX_UNCOMPRESSED // (1024 * 1024)}MB"
                             )
