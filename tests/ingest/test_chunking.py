@@ -23,8 +23,17 @@ long_doc = Document(
     workspace_id="bank",
     pages=[Page(number=1, text=LONG_TEXT)],
 )
-# 조항 머리가 있어도 상품설명서는 고정 길이로 나눈다
-product_doc = doc.model_copy(update={"meta": meta.model_copy(update={"doc_type": "product"})})
+# 조항 머리가 없는 상품설명서는 고정 길이로 나눈다
+# (Task 3부터 조항 머리가 2개 이상이면 doc_type과 무관하게 조항 단위)
+product_doc = Document(
+    meta=meta.model_copy(update={"doc_id": "prod-2", "doc_type": "product"}),
+    workspace_id="bank",
+    pages=[
+        Page(
+            number=1, text="# 정기예금 상품설명서\n기본금리는 연 2.80%입니다.\n- 제1조에 따른 우대"
+        )
+    ],
+)
 
 
 def law(*pages: str) -> Document:
@@ -113,6 +122,95 @@ def test_chunk_document_needs_two_headers_for_article_split():
 def test_chunk_document_uses_articles_for_regulation_and_terms(doc_type):
     typed = doc.model_copy(update={"meta": meta.model_copy(update={"doc_type": doc_type})})
     assert [c.article for c in chunk_document(typed)] == ["제1조", "제2조", "제2조의2"]
+
+
+@pytest.mark.parametrize("doc_type", ["internal", "product", "other"])
+def test_internal_doc_with_articles_is_split_by_article(doc_type):
+    # 가상 내부 지침도 제N조 형식이다. doc_type이 아니라 조항 머리 개수로 정한다
+    typed = doc.model_copy(update={"meta": meta.model_copy(update={"doc_type": doc_type})})
+    assert [c.article for c in chunk_document(typed)] == ["제1조", "제2조", "제2조의2"]
+
+
+def test_chunk_document_keeps_preamble_before_first_article():
+    # PR #5 리뷰 m6: 내부 지침 제1조 앞의 머리말(대외비 표시, 가상 문서 고지)을 버리지 않는다
+    guide = law(
+        "본 문서는 포트폴리오용 가상 문서입니다\n\n# 상담 응대 지침\n\n"
+        "- 문서 구분: 내부 지침 (대외비, 외부 제공 금지)\n\n"
+        "제1조(목적) 가\n\n제2조(적용 범위) 나"
+    )
+    chunks = chunk_document(guide)
+    assert [c.article for c in chunks] == [None, "제1조", "제2조"]
+    assert chunks[0].text.startswith("본 문서는 포트폴리오용 가상 문서입니다")
+    assert "대외비" in chunks[0].text
+    assert chunks[1].text == "제1조(목적) 가"
+
+
+def test_addenda_articles_are_prefixed():
+    chunks = chunk_document(
+        law("제1조(목적) 가\n제2조(정의) 나\n부칙\n제1조(시행일) 다\n제2조(경과조치) 라")
+    )
+    assert [c.article for c in chunks] == ["제1조", "제2조", "부칙 제1조", "부칙 제2조"]
+    assert chunks[1].text == "제2조(정의) 나"  # 부칙 머리 줄이 본문 마지막 조항에 붙지 않는다
+    assert chunks[2].text == "부칙\n제1조(시행일) 다"  # 부칙 머리 줄은 그 부칙의 첫 조항과 함께
+    assert chunks[3].text == "제2조(경과조치) 라"
+
+
+def test_addenda_of_law_page_with_amendment_numbers():
+    # 법령 원문: 개정마다 부칙이 있고, 조항 없는 부칙(본문만)도 있다
+    chunks = chunk_document(
+        law(
+            "제1조(목적) 가\n제2조(정의) 나\n"
+            "부 칙 <법률 제5540호, 1998. 5. 25.>\n이 법은 공포한 날부터 시행한다.\n"
+            "부칙 <법률 제21296호, 2025. 12. 30.>\n"
+            "제1조(시행일) 이 법은 공포 후 6개월이 경과한 날부터 시행한다.\n"
+            "제2조 (적용례) 다"
+        )
+    )
+    assert [c.article for c in chunks] == ["제1조", "제2조", "부칙", "부칙 제1조", "부칙 제2조"]
+    assert chunks[2].text == "부 칙 <법률 제5540호, 1998. 5. 25.>\n이 법은 공포한 날부터 시행한다."
+    assert chunks[3].text.startswith("부칙 <법률 제21296호, 2025. 12. 30.>\n제1조(시행일)")
+
+
+def test_line_starting_with_addenda_reference_is_not_addenda_header():
+    # "부칙 제7조의 개정규정은"처럼 부칙 조항을 가리키는 말이 줄 맨 앞에 와도 부칙 머리가 아니다
+    chunks = chunk_document(law("제1조(목적) 가\n부칙 제7조의 개정규정은 나\n제2조(정의) 다"))
+    assert [c.article for c in chunks] == ["제1조", "제2조"]
+
+
+def test_addenda_amendments_of_other_laws_are_not_articles():
+    # PR #8 리뷰: 부칙의 "다른 법률의 개정"은 다른 법의 조 번호로 시작하는 지시문과, 그 지시로
+    # 새로 쓰는 조문을 담는다. 이 줄들은 앞 부칙 조항의 본문이지 부칙 조항이 아니다
+    amendments = (
+        "제2조(다른 법률의 개정) ① 상법 일부를 다음과 같이 개정한다.\n"
+        "제275조 및 제446조제50호를 각각 삭제한다.\n"
+        "② 보험업법 일부를 다음과 같이 개정한다.\n"
+        "제18조 중 “금융위원회”를 “금융감독원”으로 한다.\n"
+        "제109조 각 호 외의 부분 중 “제59조제1항”을 “제23조제1항”으로 한다.\n"
+        "③ 은행법 일부를 다음과 같이 개정한다.\n"
+        "제5장에 제33조의5를 다음과 같이 신설한다.\n"
+        "제33조의5(사채등의 등록) 사채의 소유자는 등록할 수 있다.\n"
+        "제5조를 다음과 같이 한다.\n"
+        "제5조 (특례) 중앙회의 신용사업부문은 은행으로 본다."
+    )
+    chunks = chunk_document(
+        law(
+            "제1조(목적) 가\n제2조(정의) 나\n부칙 <법률 제9999호, 2020. 1. 1.>\n"
+            "제1조(시행일) 이 법은 공포한 날부터 시행한다.\n"
+            f"{amendments}\n"
+            # 부칙 조항을 줄여 보여 주는 줄은 진짜 부칙 조항이다
+            "제3조 및 제4조 생략\n제5조 삭제 <2021. 1. 1.>\n제6조 부터 제7조까지 생략"
+        )
+    )
+    assert [c.article for c in chunks] == [
+        "제1조",
+        "제2조",
+        "부칙 제1조",
+        "부칙 제2조",
+        "부칙 제3조",
+        "부칙 제5조",
+        "부칙 제6조",
+    ]
+    assert chunks[3].text == amendments
 
 
 def test_chunk_fixed_loses_no_text():
