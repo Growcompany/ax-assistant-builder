@@ -305,6 +305,14 @@ def save_report(report: EvalReport, reports_dir: Path, retriever: str, now: date
     raise AssertionError("unreachable")
 
 
+def _display_path(path: Path, root: Path) -> str:
+    """보고서에 남길 경로. 저장소 안이면 상대 경로(내 PC의 사용자 폴더 이름이 남지 않게)."""
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -448,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
             "llm_model": llm_model,
             "n_docs": len(sources),
             "n_chunks": len(chunks),
-            "golden": golden_path.as_posix(),
+            "golden": _display_path(golden_path, repo_root),
             "golden_sha256": _sha256(golden_path)[:12],
             "corpus_sha256": _corpus_digest(sources, raw_dir, repo_root),
             "commit": _git_commit(REPO_ROOT),

@@ -334,4 +334,5 @@ def test_cli_bm25_end_to_end(tmp_path, monkeypatch, capsys):
     assert report.n == 1 and report.recall_at_k == 1.0  # 범위 밖 문항은 빠진다
     assert report.config["retriever"] == "bm25" and report.config["n_chunks"] == 2
     assert report.config["role"] == "준법감시"  # 기본 역할은 내부 지침까지 본다
+    assert report.config["golden"] == "corpus/bank/golden.jsonl"  # 저장소 기준 상대 경로
     assert "| 전체 | 1 | 1.000 |" in capsys.readouterr().out
