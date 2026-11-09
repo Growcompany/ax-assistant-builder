@@ -1,6 +1,7 @@
 """코퍼스 출처 목록과 다운로드 (네트워크 없음: httpx.MockTransport로 응답을 흉내 낸다)."""
 
 import hashlib
+import importlib.util
 import io
 import json
 import zipfile
@@ -336,3 +337,58 @@ def test_source_file_for_url_and_path_sources(tmp_path):
     assert (
         source_file(guide, raw, REPO_ROOT) == REPO_ROOT / "corpus/bank/internal/guide-counseling.md"
     )
+
+
+# ---- 명령줄 (scripts/download_corpus.py) ----
+
+
+def load_cli():
+    # scripts/는 패키지가 아니라 파일 경로로 import한다
+    spec = importlib.util.spec_from_file_location(
+        "download_corpus", REPO_ROOT / "scripts" / "download_corpus.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def bank_routes(*, failing: tuple[str, ...] = ()) -> dict[str, httpx.Response]:
+    """저장소의 bank sources.yaml url 항목마다 형식에 맞는 응답. failing에 든 doc_id는 500."""
+    routes = {}
+    for s in load_sources(REPO_ROOT / "corpus" / "bank" / "sources.yaml"):
+        if s.url is None:
+            continue
+        if s.doc_id in failing:
+            routes[s.url] = httpx.Response(500)
+        elif s.format == "hwpx":
+            routes[s.url] = httpx.Response(200, content=hwpx_bytes())
+        else:
+            routes[s.url] = httpx.Response(200, text=FIXTURE_HTML)
+    return routes
+
+
+def test_cli_prints_failures_and_exits_1(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path))
+    failing = ("banking-act", "ftc-deposit-terms")
+    code = load_cli().main(["bank"], client=mock_client(bank_routes(failing=failing)))
+
+    out, err = capsys.readouterr()
+    assert code == 1
+    fail_lines = [line for line in out.splitlines() if line.startswith("[FAIL]")]
+    assert sorted(line.split()[1] for line in fail_lines) == sorted(failing)
+    assert all("500" in line for line in fail_lines)
+    assert "13 sources: 5 downloaded, 6 in repo, 2 failed" in out
+    assert err.strip() == "failed: banking-act, ftc-deposit-terms"
+    raw = tmp_path / "workspaces" / "bank" / "raw"
+    assert (raw / "depositor-protection-act.txt").is_file()  # 실패 뒤에도 계속 받는다
+    assert not (raw / "banking-act.txt").exists()
+
+
+def test_cli_exits_0_when_every_source_is_available(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path))
+    code = load_cli().main(["bank"], client=mock_client(bank_routes()))
+
+    out, err = capsys.readouterr()
+    assert code == 0 and err == ""
+    assert "[FAIL]" not in out
+    assert "13 sources: 7 downloaded, 6 in repo, 0 failed" in out

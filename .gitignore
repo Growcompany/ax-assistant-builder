@@ -26,7 +26,9 @@ data/raw/*
 data/processed/*
 !data/raw/.gitkeep
 !data/processed/.gitkeep
-data/workspaces/
+# AXB_DATA_DIR 기본값 "data"는 실행 위치 기준이라, 하위 폴더에서 실행해도 원문이 올라가지 않게
+**/data/workspaces/
+*.hwpx
 vectorstore/
 chroma_db/
 *.faiss

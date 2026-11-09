@@ -18,7 +18,8 @@ from axbuilder.workspace import WorkspaceStore
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, client: httpx.Client | None = None) -> int:
+    """client는 테스트가 가짜 응답(httpx.MockTransport)을 넣을 때만 준다."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
     parser.add_argument("workspace_id", help="예: bank")
     args = parser.parse_args(argv)
@@ -28,11 +29,13 @@ def main(argv: list[str] | None = None) -> int:
     raw_dir = WorkspaceStore(settings.data_dir / "workspaces").path(args.workspace_id) / "raw"
     sources = load_sources(REPO_ROOT / "corpus" / args.workspace_id / "sources.yaml")
 
-    with httpx.Client(
-        timeout=httpx.Timeout(60.0),
-        follow_redirects=True,
-        headers={"User-Agent": USER_AGENT},
-    ) as client:
+    if client is None:
+        client = httpx.Client(
+            timeout=httpx.Timeout(60.0),
+            follow_redirects=True,
+            headers={"User-Agent": USER_AGENT},
+        )
+    with client:
         result = download_sources(sources, raw_dir, client, REPO_ROOT)
 
     for entry in result.downloaded:
