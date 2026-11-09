@@ -36,3 +36,6 @@ chroma_db/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Claude Code local settings (per-machine)
+.claude/settings.local.json
