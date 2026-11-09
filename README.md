@@ -170,7 +170,7 @@ python -m axbuilder.eval.run --workspace bank --retriever hybrid --k 5
 ```bash
 # Ollama 설치: https://ollama.com
 ollama pull qwen3.5:4b-q4_K_M
-python -m axbuilder.eval.run --workspace bank --retriever hybrid --k 5 --with-llm   # 50문항, 확인한 PC에서 약 400초
+python -m axbuilder.eval.run --workspace bank --retriever hybrid --k 5 --with-llm   # 50문항, 확인한 PC에서 3~7분
 ```
 
 Claude로 바꾸려면 `AXB_LLM_MODE=cloud`와 `ANTHROPIC_API_KEY`를 설정하고 `--allow-cloud`를 더한다. 문항마다 유료 API를 부른다. 다른 설정은 [`.env.example`](.env.example)에 있다.
