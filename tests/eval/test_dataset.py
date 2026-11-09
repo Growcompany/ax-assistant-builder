@@ -8,6 +8,7 @@ import pytest
 
 from axbuilder.corpus import MANIFEST_NAME, load_sources, source_file
 from axbuilder.eval.dataset import Evidence, GoldItem, load_golden, validate_golden
+from axbuilder.eval.metrics import matches
 from axbuilder.generation.answer import REFUSAL_TEXT
 from axbuilder.ingest.chunking import chunk_document
 from axbuilder.ingest.loaders import load_document
@@ -213,18 +214,7 @@ def test_validate_reports_every_problem_not_just_the_first():
 # 저장소에 있는 가상 문서 6개(path 항목)는 항상(CI 포함) 대조한다.
 # 내려받는 원문 7개(url 항목)는 raw/manifest.json이 있을 때만 대조하고,
 # 그때는 13개 모두 있어야 한다.
-
-
-def hits(chunk: Chunk, ev: Evidence) -> bool:
-    """Task 9 matches()와 같은 규칙: doc_id가 같고, article·page가 있으면 그것도 같다.
-
-    Task 9에서 metrics.matches()가 생기면 이 함수 대신 그것을 쓴다(두 규칙이 갈라지지 않게).
-    """
-    return (
-        chunk.doc_id == ev.doc_id
-        and (ev.article is None or chunk.article == ev.article)
-        and (ev.page is None or chunk.page == ev.page)
-    )
+# 채점은 평가 실행기와 같은 metrics.matches()로 한다(두 규칙이 갈라지지 않게).
 
 
 def chunk_corpus(raw_dir: Path) -> dict[str, list[Chunk]]:
@@ -270,7 +260,7 @@ def test_every_golden_evidence_matches_a_real_chunk(real_chunks):
     missed = [
         f"{item.id}: {ev.doc_id} {ev.article or '(문서 단위)'}"
         for item, ev in checkable_evidence(real_chunks)
-        if not any(hits(chunk, ev) for chunk in real_chunks[ev.doc_id])
+        if not any(matches(chunk, ev) for chunk in real_chunks[ev.doc_id])
     ]
     assert missed == []
 
@@ -282,6 +272,6 @@ def test_golden_article_labels_match_exactly_one_chunk(real_chunks):
         f"{item.id}: {ev.doc_id} {ev.article}": n
         for item, ev in checkable_evidence(real_chunks)
         if ev.article is not None
-        and (n := sum(hits(chunk, ev) for chunk in real_chunks[ev.doc_id])) != 1
+        and (n := sum(matches(chunk, ev) for chunk in real_chunks[ev.doc_id])) != 1
     }
     assert ambiguous == {}
