@@ -11,7 +11,8 @@ dependencies = [
     "pdfplumber",
     "PyYAML",
     "qdrant-client",
-    "anthropic",
+    # fallbacks="default"(서버측 폴백)·stop_details·httpx2 기반 클라이언트를 쓴다. 2.6.0에서 확인
+    "anthropic>=2.6",
     "httpx",
     "fastapi",
     "uvicorn",
