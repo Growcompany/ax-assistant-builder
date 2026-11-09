@@ -125,6 +125,13 @@ class DenseIndex:
         # 임베딩이 실패해도 기존 색인이 남도록 컬렉션을 지우기 전에 계산한다
         vectors = self.embedder.embed([c.text for c in chunks])
         if self._client.collection_exists(self.collection):
+            # Windows의 로컬 모드(qdrant-client 1.20)는 delete_collection이 컬렉션의 SQLite 파일을
+            # 닫지 않은 채 지우려다 조용히 실패하고, 같은 이름으로 다시 만들면 그 파일의 옛 점을
+            # 다시 읽는다. 점을 먼저 모두 지워 두면 남은 파일에도 옛 점이 없다
+            self._client.delete(
+                self.collection,
+                points_selector=models.FilterSelector(filter=models.Filter()),
+            )
             self._client.delete_collection(self.collection)
         self._client.create_collection(
             self.collection,
