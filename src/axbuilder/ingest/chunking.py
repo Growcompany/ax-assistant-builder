@@ -14,6 +14,18 @@ ARTICLE_HEADER = re.compile(r"^[ \t]*(제\d+조(?:의\d+)?)(?=[\s(（【]|$)", r
 # "부칙 제7조의 개정규정은"처럼 부칙 조항을 가리키는 말이 줄 맨 앞에 와도 머리가 아니다
 ADDENDA_HEADER = re.compile(r"^[ \t]*(부[ \t]*칙)[ \t]*(?=$|[<(（\[〈【])", re.MULTILINE)
 ADDENDA = "부칙"
+# 부칙의 "다른 법률의 개정"에는 다른 법의 조 번호로 시작하는 지시문이 줄 맨 앞에 온다.
+# 조 번호 바로 뒤에 본문 대신 고칠 위치가 온다: "제18조 중 “…”를", "제109조 각 호 외의 부분 중",
+# "제275조 및 제446조제50호를 각각 삭제한다." ("제3조 및 제4조 생략"은 진짜 부칙 조항)
+_REF = r"제\d+조(?:의\d+)?(?:제\d+항)?(?:제\d+호(?:의\d+)?)?"
+AMENDMENT_AFTER_HEADER = re.compile(
+    rf"(?:[ \t]*(?:및|ㆍ|,)[ \t]*{_REF})*"
+    r"(?:[을를]|[ \t]*(?:중|각[ \t]*호|본문|단서|전단|후단|제목)(?=\s|$))"
+)
+# "제5조를 다음과 같이 한다.", "제33조의5를 다음과 같이 신설한다." 다음 줄은 새로 쓰는 다른 법 조문
+REWRITTEN_ARTICLE_BEFORE = re.compile(
+    r"조(?:의\d+)?[을를][ \t]+(?:각각[ \t]+)?다음과[ \t]+같이[ \t]+(?:신설)?한다\.\s*$"
+)
 
 # (원문에서의 시작 위치, 청크 본문, 조 번호)
 Piece = tuple[int, str, str | None]
@@ -24,6 +36,7 @@ def chunk_by_article(doc: Document) -> list[Chunk]:
 
     부칙 줄 뒤의 조항은 article을 "부칙 제N조"로 붙여 본문 조항과 겹치지 않게 한다. 부칙 머리 줄은
     그 부칙의 첫 조항 청크 앞에 붙이고, 조항 없이 본문만 있는 부칙은 article="부칙" 청크가 된다.
+    부칙 안에서 다른 법률을 고치는 줄은 조항 머리로 보지 않고 앞 부칙 조항 본문에 둔다.
     """
     text, page_at = _join_pages(doc)
     starts: list[int] = [0]
@@ -33,6 +46,8 @@ def chunk_by_article(doc: Document) -> list[Chunk]:
         if label == ADDENDA:
             in_addenda = True
         elif in_addenda:
+            if _amends_other_law(text, start, label):
+                continue
             label = f"{ADDENDA} {label}"
             if articles[-1] == ADDENDA:  # 바로 앞이 부칙 머리 줄이면 그 줄부터 이 조항 청크로
                 articles[-1] = label
@@ -82,6 +97,14 @@ def _headers(text: str) -> list[tuple[int, str]]:
     found = [(m.start(1), m.group(1)) for m in ARTICLE_HEADER.finditer(text)]
     found += [(m.start(1), ADDENDA) for m in ADDENDA_HEADER.finditer(text)]
     return sorted(found)
+
+
+def _amends_other_law(text: str, start: int, label: str) -> bool:
+    """부칙 안의 이 조항 머리가 다른 법률 개정 지시문이거나, 지시문 바로 뒤에 새로 쓰는 조문인지."""
+    if AMENDMENT_AFTER_HEADER.match(text, start + len(label)):
+        return True
+    # 앞 줄 끝만 보면 된다 (지시문은 짧다)
+    return REWRITTEN_ARTICLE_BEFORE.search(text, max(0, start - 200), start) is not None
 
 
 def _join_pages(doc: Document) -> tuple[str, Callable[[int], int]]:

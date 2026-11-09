@@ -177,6 +177,42 @@ def test_line_starting_with_addenda_reference_is_not_addenda_header():
     assert [c.article for c in chunks] == ["제1조", "제2조"]
 
 
+def test_addenda_amendments_of_other_laws_are_not_articles():
+    # PR #8 리뷰: 부칙의 "다른 법률의 개정"은 다른 법의 조 번호로 시작하는 지시문과, 그 지시로
+    # 새로 쓰는 조문을 담는다. 이 줄들은 앞 부칙 조항의 본문이지 부칙 조항이 아니다
+    amendments = (
+        "제2조(다른 법률의 개정) ① 상법 일부를 다음과 같이 개정한다.\n"
+        "제275조 및 제446조제50호를 각각 삭제한다.\n"
+        "② 보험업법 일부를 다음과 같이 개정한다.\n"
+        "제18조 중 “금융위원회”를 “금융감독원”으로 한다.\n"
+        "제109조 각 호 외의 부분 중 “제59조제1항”을 “제23조제1항”으로 한다.\n"
+        "③ 은행법 일부를 다음과 같이 개정한다.\n"
+        "제5장에 제33조의5를 다음과 같이 신설한다.\n"
+        "제33조의5(사채등의 등록) 사채의 소유자는 등록할 수 있다.\n"
+        "제5조를 다음과 같이 한다.\n"
+        "제5조 (특례) 중앙회의 신용사업부문은 은행으로 본다."
+    )
+    chunks = chunk_document(
+        law(
+            "제1조(목적) 가\n제2조(정의) 나\n부칙 <법률 제9999호, 2020. 1. 1.>\n"
+            "제1조(시행일) 이 법은 공포한 날부터 시행한다.\n"
+            f"{amendments}\n"
+            # 부칙 조항을 줄여 보여 주는 줄은 진짜 부칙 조항이다
+            "제3조 및 제4조 생략\n제5조 삭제 <2021. 1. 1.>\n제6조 부터 제7조까지 생략"
+        )
+    )
+    assert [c.article for c in chunks] == [
+        "제1조",
+        "제2조",
+        "부칙 제1조",
+        "부칙 제2조",
+        "부칙 제3조",
+        "부칙 제5조",
+        "부칙 제6조",
+    ]
+    assert chunks[3].text == amendments
+
+
 def test_chunk_fixed_loses_no_text():
     chunks = chunk_fixed(long_doc, size=100, overlap=20)
     assert chunks[0].text + "".join(c.text[20:] for c in chunks[1:]) == LONG_TEXT
