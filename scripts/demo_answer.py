@@ -67,25 +67,28 @@ def show(question: str, a: Answer) -> None:
     print(f"\n### 질문: {question}")
     print(f"거절: {a.refused}")
     print(f"답변: {a.text}")
-    print("인용:")
+    print("인용 (답변의 [n] = n번째 인용):")
     for i, c in enumerate(a.citations, start=1):
         where = c.article or (f"p.{c.page}" if c.page is not None else "")
-        print(f"  ({i}) {c.doc_id} {where} — {c.title} [{c.chunk_id}]")
+        print(f"  [{i}] {c.doc_id} {where} — {c.title} ({c.chunk_id})")
     if not a.citations:
         print("  (없음)")
-    print("검색 결과(프롬프트에 넣은 순서 = 자료 번호):")
+    print("검색 결과(프롬프트에 넣은 순서 = 자료 번호 = LLM 원문의 [n]):")
     for n, s in enumerate(a.retrieved, start=1):
         c = s.chunk
         where = c.article or (f"p.{c.page}" if c.page is not None else "")
         print(f"  [{n}] {s.score:.4f} {c.doc_id} {where} ({c.access_level})")
     if a.llm is not None:
-        raw = a.llm.text.replace("\n", " ")
         print(
             f"LLM: {a.llm.model} in={a.llm.input_tokens} out={a.llm.output_tokens} "
             f"{a.llm.latency_ms / 1000:.1f}s stop={a.llm.stop_reason}"
         )
-        if raw.strip() != a.text:
-            print(f"LLM 원문: {raw}")
+        # 거절 문구로 바꿨거나 인용 번호를 다시 매겼을 때만 원문을 보여 준다. 줄바꿈을
+        # 바꾸기 전에 비교해야 여러 줄 답변이 같은 내용으로 두 번 나오지 않는다
+        raw = a.llm.text.strip()
+        if raw != a.text:
+            one_line = raw.replace("\n", " ")
+            print(f"LLM 원문: {one_line}")
 
 
 def main(argv: list[str] | None = None) -> int:
