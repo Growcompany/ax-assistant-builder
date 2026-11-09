@@ -1,6 +1,7 @@
 """평가 질문셋(골든셋) 읽기와 검증. 파일은 한 줄에 GoldItem JSON 하나(JSON Lines)."""
 
 import json
+import re
 from pathlib import Path
 from typing import Literal
 
@@ -9,6 +10,9 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 QType = Literal[
     "lookup", "table", "multi_doc", "out_of_scope", "needs_human", "no_access", "outdated"
 ]
+# ingest.chunking이 청크에 붙이는 article 라벨 형식. 이 밖의 라벨("7조", "제 7조", "제7조 ")은
+# 어떤 청크와도 같지 않아 그 근거가 오류 없이 0점이 된다
+ARTICLE_LABEL = re.compile(r"(?:부칙 )?제\d+조(?:의\d+)?|부칙")
 
 
 class Evidence(BaseModel):
@@ -33,7 +37,10 @@ class GoldItem(BaseModel):
 
 
 def load_golden(path: Path) -> list[GoldItem]:
-    """빈 줄·잘못된 JSON·형식이 틀린 항목은 "파일:줄 번호"를 담은 ValueError로 알린다."""
+    """빈 줄·잘못된 JSON·형식이 틀린 항목은 "파일:줄 번호"를 담은 ValueError로 알린다.
+
+    문항이 하나도 없는 파일도 ValueError다(0문항 평가가 성공으로 보이지 않게).
+    """
     # splitlines()는 JSON 문자열 안에 그대로 들어갈 수 있는 U+2028 등에서도 줄을 나누므로 "\n"으로만
     lines = path.read_text(encoding="utf-8").split("\n")
     if lines[-1] == "":  # 파일 끝 줄바꿈
@@ -51,6 +58,8 @@ def load_golden(path: Path) -> list[GoldItem]:
             items.append(GoldItem.model_validate(data))
         except ValidationError as e:
             raise ValueError(f"{where}: {e}") from e
+    if not items:
+        raise ValueError(f"{path}: no items (empty golden set)")
     return items
 
 
@@ -62,9 +71,21 @@ def validate_golden(items: list[GoldItem], known_doc_ids: set[str]) -> list[str]
         if item.id in seen:
             problems.append(f"{item.id}: duplicate id")
         seen.add(item.id)
+        if not item.question.strip():
+            problems.append(f"{item.id}: empty question")
+        if not item.answer.strip():
+            problems.append(f"{item.id}: empty answer")
+        seen_evidence: set[tuple[str, str | None, int | None]] = set()
         for ev in item.evidence:
             if ev.doc_id not in known_doc_ids:
                 problems.append(f"{item.id}: unknown doc_id {ev.doc_id!r}")
+            if ev.article is not None and not ARTICLE_LABEL.fullmatch(ev.article):
+                problems.append(f"{item.id}: malformed article label {ev.article!r}")
+            key = (ev.doc_id, ev.article, ev.page)
+            if key in seen_evidence:
+                where = " ".join(str(part) for part in key if part is not None)
+                problems.append(f"{item.id}: duplicate evidence {where}")
+            seen_evidence.add(key)
         # 범위 밖 질문은 거절이 정답이라 근거가 없어야 하고, 나머지는 근거가 있어야 채점할 수 있다
         if item.qtype == "out_of_scope" and item.evidence:
             problems.append(f"{item.id}: out_of_scope item must have no evidence")

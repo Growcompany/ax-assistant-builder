@@ -117,7 +117,18 @@ def test_load_golden_rejects_non_object_line(tmp_path):
         load_golden(path)
 
 
-# ---- validate_golden: 규칙 4가지 ----
+@pytest.mark.parametrize(
+    ("content", "message"), [("", r"golden\.jsonl: no items"), ("\n", r"golden\.jsonl:1: blank")]
+)
+def test_load_golden_rejects_empty_file(tmp_path, content, message):
+    # 0문항으로 평가가 "성공"하면 잘린 파일을 알아채지 못한다
+    path = tmp_path / "golden.jsonl"
+    path.write_text(content, encoding="utf-8")
+    with pytest.raises(ValueError, match=message):
+        load_golden(path)
+
+
+# ---- validate_golden: 계획의 규칙 4가지 ----
 
 
 def test_validate_accepts_valid_items():
@@ -152,6 +163,37 @@ def test_validate_reports_missing_evidence(qtype):
     assert validate_golden([item], KNOWN) == [f"bank-001: {qtype} item needs evidence"]
 
 
+# ---- validate_golden: 원문 없이 CI에서 잡을 수 있는 라벨·문구 실수 ----
+
+
+@pytest.mark.parametrize("article", ["제7조", "제30조의3", "부칙 제2조", "부칙 제1조의2", "부칙"])
+def test_validate_accepts_article_labels_the_chunker_produces(article):
+    item = gold(evidence=[{"doc_id": "banking-act", "article": article}])
+    assert validate_golden([item], KNOWN) == []
+
+
+@pytest.mark.parametrize(
+    "article", ["7조", "제 7조", "제7조 ", "제7조제1항", "제7조(목적)", "부칙제2조", "부칙 7조", ""]
+)
+def test_validate_reports_malformed_article_label(article):
+    # 형식이 틀린 라벨은 어떤 청크의 article과도 같지 않아 그 근거가 조용히 0점이 된다
+    item = gold(evidence=[{"doc_id": "banking-act", "article": article}])
+    assert validate_golden([item], KNOWN) == [f"bank-001: malformed article label {article!r}"]
+
+
+def test_validate_reports_duplicate_evidence():
+    ev = {"doc_id": "banking-act", "article": "제30조의3"}
+    item = gold(evidence=[ev, {"doc_id": "prod-fixed-deposit"}, ev], qtype="multi_doc")
+    assert validate_golden([item], KNOWN) == ["bank-001: duplicate evidence banking-act 제30조의3"]
+
+
+def test_validate_reports_blank_question_and_answer():
+    assert validate_golden([gold(question=" ", answer="")], KNOWN) == [
+        "bank-001: empty question",
+        "bank-001: empty answer",
+    ]
+
+
 def test_validate_reports_every_problem_not_just_the_first():
     items = [
         gold(),
@@ -167,11 +209,17 @@ def test_validate_reports_every_problem_not_just_the_first():
     ]
 
 
-# ---- 실제 청크와 라벨 대조 (내려받은 원문이 있을 때만: CI에서는 skip) ----
+# ---- 실제 청크와 라벨 대조 ----
+# 저장소에 있는 가상 문서 6개(path 항목)는 항상(CI 포함) 대조한다.
+# 내려받는 원문 7개(url 항목)는 raw/manifest.json이 있을 때만 대조하고,
+# 그때는 13개 모두 있어야 한다.
 
 
 def hits(chunk: Chunk, ev: Evidence) -> bool:
-    """Task 9 matches()와 같은 규칙: doc_id가 같고, article·page가 있으면 그것도 같다."""
+    """Task 9 matches()와 같은 규칙: doc_id가 같고, article·page가 있으면 그것도 같다.
+
+    Task 9에서 metrics.matches()가 생기면 이 함수 대신 그것을 쓴다(두 규칙이 갈라지지 않게).
+    """
     return (
         chunk.doc_id == ev.doc_id
         and (ev.article is None or chunk.article == ev.article)
@@ -179,27 +227,49 @@ def hits(chunk: Chunk, ev: Evidence) -> bool:
     )
 
 
-@pytest.fixture(scope="module")
-def real_chunks() -> dict[str, list[Chunk]]:
-    data_dir = Settings.from_env().data_dir
-    if not data_dir.is_absolute():
-        data_dir = REPO_ROOT / data_dir
-    raw_dir = data_dir / "workspaces" / "bank" / "raw"
-    if not (raw_dir / MANIFEST_NAME).is_file():
-        pytest.skip(f"no downloaded corpus in {raw_dir} (python scripts/download_corpus.py bank)")
+def chunk_corpus(raw_dir: Path) -> dict[str, list[Chunk]]:
+    """doc_id → 실제 청크. url 문서는 raw_dir에 manifest가 있을 때만(그때는 빠짐없이) 나눈다."""
+    downloaded = (raw_dir / MANIFEST_NAME).is_file()
     chunks: dict[str, list[Chunk]] = {}
     for source in load_sources(SOURCES):
+        if source.url is not None and not downloaded:
+            continue  # 원문을 받지 않은 환경(CI): python scripts/download_corpus.py bank
         path = source_file(source, raw_dir, REPO_ROOT)
         assert path.is_file(), f"{source.doc_id}: {path} missing; re-run download_corpus.py bank"
         chunks[source.doc_id] = chunk_document(load_document(path, source.doc_meta(), "bank"))
     return chunks
 
 
+@pytest.fixture(scope="module")
+def real_chunks() -> dict[str, list[Chunk]]:
+    data_dir = Settings.from_env().data_dir
+    if not data_dir.is_absolute():
+        data_dir = REPO_ROOT / data_dir
+    return chunk_corpus(data_dir / "workspaces" / "bank" / "raw")
+
+
+def checkable_evidence(real_chunks: dict[str, list[Chunk]]) -> list[tuple[GoldItem, Evidence]]:
+    pairs = [
+        (item, ev)
+        for item in load_golden(GOLDEN)
+        for ev in item.evidence
+        if ev.doc_id in real_chunks
+    ]
+    assert pairs, "no golden evidence points to an available document"
+    return pairs
+
+
+def test_without_downloaded_corpus_repo_documents_are_still_checked(tmp_path):
+    # manifest가 없는 빈 raw 폴더 = CI. 저장소의 가상 문서 6개는 그래도 대조 대상이어야 한다
+    chunks = chunk_corpus(tmp_path)
+    assert set(chunks) == {s.doc_id for s in load_sources(SOURCES) if s.path is not None}
+    assert any(ev.article for _, ev in checkable_evidence(chunks))
+
+
 def test_every_golden_evidence_matches_a_real_chunk(real_chunks):
     missed = [
         f"{item.id}: {ev.doc_id} {ev.article or '(문서 단위)'}"
-        for item in load_golden(GOLDEN)
-        for ev in item.evidence
+        for item, ev in checkable_evidence(real_chunks)
         if not any(hits(chunk, ev) for chunk in real_chunks[ev.doc_id])
     ]
     assert missed == []
@@ -210,8 +280,7 @@ def test_golden_article_labels_match_exactly_one_chunk(real_chunks):
     # 엉뚱한 청크도 정답으로 센다
     ambiguous = {
         f"{item.id}: {ev.doc_id} {ev.article}": n
-        for item in load_golden(GOLDEN)
-        for ev in item.evidence
+        for item, ev in checkable_evidence(real_chunks)
         if ev.article is not None
         and (n := sum(hits(chunk, ev) for chunk in real_chunks[ev.doc_id])) != 1
     }
