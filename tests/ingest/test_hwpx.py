@@ -7,8 +7,9 @@ from xml.sax.saxutils import escape
 
 import pytest
 
+import axbuilder.ingest.loaders as loaders
 from axbuilder.ingest.chunking import chunk_document
-from axbuilder.ingest.loaders import load_document
+from axbuilder.ingest.loaders import DocumentTooLargeError, load_document
 from axbuilder.models import DocMeta
 
 HS = "http://www.hancom.co.kr/hwpml/2011/section"
@@ -195,3 +196,65 @@ def test_hwpx_without_sections_raises_value_error(tmp_path):
     path = write_hwpx(tmp_path / "empty.hwpx", {})
     with pytest.raises(ValueError):
         load_document(path, meta_terms, "bank")
+
+
+# ---- 요소 수 폭탄 (v0.1.0 보안 점검): 빈 <hp:p/>만 20MB(파일 30KB)가 9초·544MB를 썼다 ----
+
+
+def test_hwpx_text_after_nested_table_stays_in_outer_paragraph(tmp_path):
+    # 바깥 문단의 줄은 문단이 시작한 자리에 놓이고, 표 뒤에 이어지는 글도 그 줄에 붙는다
+    body = (
+        "<hp:p><hp:run><hp:t>앞</hp:t></hp:run><hp:run><hp:tbl><hp:tr><hp:tc><hp:subList>"
+        + paragraph("셀")
+        + "<hp:p><hp:run/></hp:p>"
+        + "</hp:subList></hp:tc></hp:tr></hp:tbl></hp:run><hp:run><hp:t>뒤</hp:t></hp:run></hp:p>"
+        + paragraph("다음 문단")
+    )
+    path = write_hwpx(tmp_path / "terms.hwpx", {"section0.xml": section_xml(body)})
+    assert lines_of(path) == ["앞뒤", "셀", "다음 문단"]
+
+
+def test_hwpx_text_element_edge_cases(tmp_path):
+    body = (
+        "<hp:t>문단 밖 글자는 버린다</hp:t>"
+        # hp:t 안의 다른 요소: 그 안의 글자는 버리고 뒤에 이어지는 글자는 살린다.
+        # 공백류 요소는 hp:t 바로 아래에 있을 때만 공백이 된다
+        '<hp:p><hp:run><hp:t>가<hp:markpenBegin color="#FFFF00">표시<hp:tab/></hp:markpenBegin>'
+        "나<hp:lineBreak/>다<hp:p><hp:run><hp:t>안쪽 문단</hp:t></hp:run></hp:p>라</hp:t>"
+        "</hp:run></hp:p>"
+    )
+    path = write_hwpx(tmp_path / "terms.hwpx", {"section0.xml": section_xml(body)})
+    assert lines_of(path) == ["가나 다라"]
+
+
+def empty_paragraphs(count: int) -> str:
+    return section_xml("<hp:p/>" * count)
+
+
+def test_hwpx_rejects_too_many_elements(tmp_path, monkeypatch):
+    # 요소는 모든 구역을 합쳐 센다 (구역마다 뿌리 hs:sec 하나 + 문단들)
+    monkeypatch.setattr(loaders, "HWPX_MAX_ELEMENTS", 100)
+    ok = {"section0.xml": empty_paragraphs(49), "section1.xml": section_xml(paragraph("가") * 16)}
+    path = write_hwpx(tmp_path / "ok.hwpx", ok)  # 50 + (1 + 16 * 3) = 99
+    assert lines_of(path) == ["가"] * 16
+    bomb = {"section0.xml": empty_paragraphs(49), "section1.xml": empty_paragraphs(50)}
+    path = write_hwpx(tmp_path / "bomb.hwpx", bomb)  # 50 + 51 = 101
+    with pytest.raises(DocumentTooLargeError, match="more than 100 XML elements"):
+        load_document(path, meta_terms, "bank")
+
+
+def test_hwpx_empty_elements_do_not_build_a_tree(tmp_path):
+    # 상한 아래여도 요소마다 객체를 남기면 메모리가 요소 수에 비례한다(ElementTree로 읽던 때는
+    # 이 파일의 tracemalloc 최고치가 31.7MB, 지금은 2.9MB). 글자만 모으고 요소는 남기지 않는다
+    assert loaders.HWPX_MAX_ELEMENTS >= 200_001
+    path = write_hwpx(tmp_path / "many.hwpx", {"section0.xml": empty_paragraphs(200_000)})
+    assert path.stat().st_size < 16 * 1024
+
+    tracemalloc.start()
+    try:
+        doc = load_document(path, meta_terms, "bank")
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert doc.pages[0].text == ""
+    assert peak < 8 * 1024 * 1024, f"peak {peak:,} bytes"

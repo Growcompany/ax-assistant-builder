@@ -14,10 +14,16 @@ deflate는 최대 약 1000배로 풀리고 필터를 겹치면 곱으로 커진�
   그래서 layout_budget()이 레이아웃 객체(글자·선·그림) 수를 쪽마다, 문서 전체로 묶는다.
   쪽을 다 읽으면 pdfplumber가 객체를 버리므로 메모리는 쪽 하나 분량까지만 쓰고, 문서 전체 상한은
   쪽이 아주 많은 문서의 파싱 시간을 묶는다
+- 내용이 없는 쪽도 pdfplumber가 쪽 객체를 만들고 읽는 데 시간과 메모리를 쓴다. 빈 쪽 10만 개짜리
+  7MB PDF가 27초·510MB를 썼다(v0.1.0 보안 점검에서 재현, 해제량 0·레이아웃 객체 0).
+  check_page_count()가 쪽 객체를 만들기 전에 쪽 수를 센다
+- 바꿔 끼울 pdfminer 이름이 없어지면 install()이 PDFGuardUnavailableError로 실패한다. 그냥
+  대입하면 pdfminer가 이름을 바꿨을 때 오류 없이 상한이 꺼진다
 - CCITTFax 같은 순수 파이썬 디코더의 CPU 시간은 막지 못한다. 이런 위험까지 막으려면 메모리·시간
   상한을 건 별도 프로세스에서 파싱해야 한다(M-3)
 """
 
+import itertools
 import logging
 import threading
 import zlib
@@ -29,6 +35,8 @@ from typing import Any
 from pdfminer import pdftypes
 from pdfminer.converter import PDFLayoutAnalyzer
 from pdfminer.lzw import LZWDecoder
+from pdfminer.pdfdocument import PDFDocument
+from pdfminer.pdfpage import PDFPage
 
 logger = logging.getLogger(__name__)
 _state = threading.local()
@@ -45,6 +53,37 @@ class PDFDecodeLimitError(PDFLimitError):
 
 class PDFLayoutLimitError(PDFLimitError):
     """레이아웃 객체(글자·선·그림) 수가 쪽 또는 문서의 상한을 넘었다."""
+
+
+class PDFPageLimitError(PDFLimitError):
+    """쪽 수가 상한을 넘었다."""
+
+
+class PDFGuardUnavailableError(RuntimeError):
+    """바꿔 끼울 pdfminer 이름이 없다. 상한 없이 PDF를 읽지 않도록 import에서 멈춘다."""
+
+
+def _require(owner: Any, name: str) -> Any:
+    """owner가 직접 가진 속성 name. 없으면(pdfminer가 이름을 바꾸거나 옮겼으면) 실패한다."""
+    try:
+        return vars(owner)[name]
+    except KeyError:
+        raise PDFGuardUnavailableError(
+            f"pdf_guard cannot limit PDF parsing: pdfminer {owner.__name__}.{name} is missing. "
+            "This pdfminer.six version is not supported by axbuilder.ingest.pdf_guard; "
+            "update pdf_guard (and its tests) before parsing untrusted PDFs"
+        ) from None
+
+
+def check_page_count(document: PDFDocument, max_pages: int) -> None:
+    """쪽이 max_pages개를 넘으면 PDFPageLimitError. pdfplumber의 pdf.pages보다 먼저 부른다.
+
+    카탈로그 /Pages의 /Count는 파일에 적힌 값이라 믿지 않고, pdfminer의 쪽 반복자를 상한+1개까지만
+    돈다(쪽 사전만 읽는다. pdfplumber Page 객체와 레이아웃은 만들지 않는다).
+    """
+    pages = itertools.islice(PDFPage.create_pages(document), max_pages + 1)
+    if sum(1 for _ in pages) > max_pages:
+        raise PDFPageLimitError(f"the PDF has more than {max_pages:,} pages")
 
 
 @contextmanager
@@ -144,9 +183,9 @@ class _BoundedZlib:
         return getattr(zlib, name)
 
 
-_original_corrupted = pdftypes.decompress_corrupted
-_original_rldecode = pdftypes.rldecode
-_original_lzwdecode = pdftypes.lzwdecode
+_original_corrupted = _require(pdftypes, "decompress_corrupted")
+_original_rldecode = _require(pdftypes, "rldecode")
+_original_lzwdecode = _require(pdftypes, "lzwdecode")
 
 
 def _inflate_corrupted(data: bytes) -> bytes:
@@ -211,10 +250,10 @@ def _rldecode(data: bytes) -> bytes:
 
 # ---- 레이아웃 객체 수 ----
 
-_original_begin_page = PDFLayoutAnalyzer.begin_page
-_original_render_char = PDFLayoutAnalyzer.render_char
-_original_paint_path = PDFLayoutAnalyzer.paint_path
-_original_render_image = PDFLayoutAnalyzer.render_image
+_original_begin_page = _require(PDFLayoutAnalyzer, "begin_page")
+_original_render_char = _require(PDFLayoutAnalyzer, "render_char")
+_original_paint_path = _require(PDFLayoutAnalyzer, "paint_path")
+_original_render_image = _require(PDFLayoutAnalyzer, "render_image")
 
 
 def _count_layout_object() -> None:
@@ -251,15 +290,25 @@ def _render_image(self: PDFLayoutAnalyzer, *args: Any, **kwargs: Any) -> None:
 
 def install() -> None:
     """pdftypes의 해제 함수와 PDFLayoutAnalyzer의 객체 생성 함수를 바꿔 끼운다.
-    여러 번 불러도 한 번만 바뀐다. pdfplumber의 집계기는 super()로 이 함수들을 부른다."""
-    pdftypes.zlib = _BoundedZlib()  # type: ignore[assignment]
-    pdftypes.decompress_corrupted = _inflate_corrupted
-    pdftypes.lzwdecode = _lzwdecode
-    pdftypes.rldecode = _rldecode
-    PDFLayoutAnalyzer.begin_page = _begin_page  # type: ignore[method-assign]
-    PDFLayoutAnalyzer.render_char = _render_char  # type: ignore[method-assign]
-    PDFLayoutAnalyzer.paint_path = _paint_path  # type: ignore[method-assign]
-    PDFLayoutAnalyzer.render_image = _render_image  # type: ignore[method-assign]
+    여러 번 불러도 한 번만 바뀐다. pdfplumber의 집계기는 super()로 이 함수들을 부른다.
+
+    바꿀 이름이 하나라도 없으면 아무것도 바꾸지 않고 PDFGuardUnavailableError. pdftypes.zlib은
+    pdftypes가 import한 모듈 이름이라, pdfminer가 import 방식을 바꾸면 대입해도 쓰이지 않는다.
+    """
+    replacements: list[tuple[Any, str, Any]] = [
+        (pdftypes, "zlib", _BoundedZlib()),
+        (pdftypes, "decompress_corrupted", _inflate_corrupted),
+        (pdftypes, "lzwdecode", _lzwdecode),
+        (pdftypes, "rldecode", _rldecode),
+        (PDFLayoutAnalyzer, "begin_page", _begin_page),
+        (PDFLayoutAnalyzer, "render_char", _render_char),
+        (PDFLayoutAnalyzer, "paint_path", _paint_path),
+        (PDFLayoutAnalyzer, "render_image", _render_image),
+    ]
+    for owner, name, _ in replacements:
+        _require(owner, name)
+    for owner, name, replacement in replacements:
+        setattr(owner, name, replacement)
 
 
 install()

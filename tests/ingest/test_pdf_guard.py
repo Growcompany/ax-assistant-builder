@@ -247,3 +247,106 @@ def test_page_limit_resets_per_page_but_document_limit_does_not(tmp_path, monkey
     path.write_bytes(make_multipage_pdf([glyph_ops(60)] * 3))
     with pytest.raises(DocumentTooLargeError, match="the PDF has more than 150 layout objects"):
         load_document(path, meta, "bank")
+
+
+# ---- 쪽 수 폭탄 (v0.1.0 보안 점검): 내용 없는 쪽 10만 개(7MB)가 27초·510MB를 썼다 ----
+
+
+def empty_pages_pdf(pages: int, declared_count: int | None = None) -> bytes:
+    """내용 없는 쪽만 있는 PDF. MediaBox는 쪽 트리에서 물려받는다. /Count는 속일 수 있다."""
+    kids = b" ".join(b"%d 0 R" % (3 + i) for i in range(pages))
+    count = pages if declared_count is None else declared_count
+    objs = {
+        1: b"<< /Type /Catalog /Pages 2 0 R >>",
+        2: b"<< /Type /Pages /MediaBox [0 0 612 792] /Kids [%s] /Count %d >>" % (kids, count),
+    }
+    for i in range(pages):
+        objs[3 + i] = b"<< /Type /Page /Parent 2 0 R >>"
+    return write_pdf(objs)
+
+
+def test_default_page_limit():
+    assert loaders.PDF_MAX_PAGES == 5_000
+
+
+def test_pdf_at_page_limit_still_parses(tmp_path, monkeypatch):
+    monkeypatch.setattr(loaders, "PDF_MAX_PAGES", 3)
+    path = tmp_path / "ok.pdf"
+    path.write_bytes(make_multipage_pdf([glyph_ops(5)] * 3))
+    assert [p.text for p in load_document(path, meta, "bank").pages] == ["A" * 5] * 3
+
+
+@pytest.mark.parametrize("declared_count", [None, 1])
+def test_too_many_pages_rejected_before_page_objects_are_built(
+    tmp_path, monkeypatch, declared_count
+):
+    # 카탈로그의 /Count는 공격자가 적는 값이라 믿지 않는다(1이라고 적어도 실제 쪽을 센다).
+    # pdfplumber의 Page 객체는 하나도 만들지 않고 거절해야 한다
+    monkeypatch.setattr(loaders, "PDF_MAX_PAGES", 3)
+    built = []
+    original_page = pdfplumber.pdf.Page
+
+    def counting_page(*args, **kwargs):
+        built.append(1)
+        return original_page(*args, **kwargs)
+
+    monkeypatch.setattr(pdfplumber.pdf, "Page", counting_page)
+    path = tmp_path / "pages.pdf"
+    path.write_bytes(empty_pages_pdf(4, declared_count))
+    with pytest.raises(DocumentTooLargeError, match="more than 3 pages"):
+        load_document(path, meta, "bank")
+    assert built == []
+
+
+def test_page_count_stops_iterating_just_past_the_limit(tmp_path):
+    # 쪽이 아무리 많아도 상한+1개까지만 돈다 (쪽 트리 전체를 걷지 않는다)
+    path = tmp_path / "pages.pdf"
+    path.write_bytes(empty_pages_pdf(50))
+    with pdfplumber.open(path) as pdf:
+        created = []
+        original = pdf_guard.PDFPage.create_pages
+
+        def spying(document):
+            for page in original(document):
+                created.append(page)
+                yield page
+
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr(pdf_guard.PDFPage, "create_pages", spying)
+            with pytest.raises(pdf_guard.PDFPageLimitError):
+                pdf_guard.check_page_count(pdf.doc, 10)
+            assert len(created) == 11
+            created.clear()
+            pdf_guard.check_page_count(pdf.doc, 50)  # 상한과 같으면 통과
+            assert len(created) == 50
+
+
+# ---- 보호가 조용히 꺼지지 않게: 바꿔 끼울 pdfminer 속성이 없으면 install()이 실패한다 ----
+
+
+@pytest.mark.parametrize(
+    ("owner", "name"),
+    [
+        (pdftypes, "zlib"),
+        (pdftypes, "decompress_corrupted"),
+        (pdftypes, "lzwdecode"),
+        (pdftypes, "rldecode"),
+        (pdf_guard.PDFLayoutAnalyzer, "begin_page"),
+        (pdf_guard.PDFLayoutAnalyzer, "render_char"),
+        (pdf_guard.PDFLayoutAnalyzer, "paint_path"),
+        (pdf_guard.PDFLayoutAnalyzer, "render_image"),
+    ],
+)
+def test_install_fails_loudly_when_pdfminer_attribute_is_missing(monkeypatch, owner, name):
+    # pdfminer가 이름을 바꾸면 그냥 대입하는 것으로는 아무 일도 없이 상한이 꺼진다
+    monkeypatch.delattr(owner, name)
+    with pytest.raises(pdf_guard.PDFGuardUnavailableError, match=name):
+        pdf_guard.install()
+    assert name not in vars(owner)  # 실패하면 아무것도 바꿔 끼우지 않는다
+
+
+def test_install_is_idempotent_and_keeps_guards():
+    pdf_guard.install()
+    assert isinstance(pdftypes.zlib, pdf_guard._BoundedZlib)
+    assert pdftypes.rldecode is pdf_guard._rldecode
+    assert pdf_guard.PDFLayoutAnalyzer.render_char is pdf_guard._render_char
