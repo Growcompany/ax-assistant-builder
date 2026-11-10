@@ -29,6 +29,9 @@ ml = [
     "sentence-transformers",
 ]
 
+[project.scripts]
+axb = "axbuilder.cli:main"
+
 [build-system]
 requires = ["setuptools>=69"]
 build-backend = "setuptools.build_meta"
