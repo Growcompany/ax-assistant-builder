@@ -20,15 +20,16 @@ deflate는 최대 약 1000배로 풀리고 필터를 겹치면 곱으로 커진�
 - 객체 수도 묶는다(object_budget). 쪽이 하나도 없으면 pdfminer는 xref가 선언한 모든 객체 번호를
   훑는데, 그 수는 파일에 적힌 숫자일 뿐이라 199바이트 PDF가 10^12개를 선언할 수 있다(PR #19
   보안 리뷰에서 재현: 40만 개에 12.6초, 10^12개는 끝나지 않음). check_object_count()가 훑기 전에
-  선언된 수를 본다. 객체 스트림(ObjStm)은 선언한 객체(/N)까지만 파싱하고 그 수를 같은 예산에서
-  뺀다(pdfminer는 /N과 무관하게 스트림 끝까지 파싱해 들고 있는다). 객체 "하나" 안에 든 배열·
-  사전의 크기는 묶지 못한다
+  선언된 수(서로 다른 객체 번호)를 본다. 객체 스트림(ObjStm)은 선언한 객체(/N)까지만 파싱한다
+  (pdfminer는 /N과 무관하게 스트림 끝까지 파싱해 들고 있는다). xref를 복구하는 경로
+  (PDFXRefFallback.load)도 같다. 객체 "하나" 안에 든 배열·사전의 크기는 묶지 못한다
 - 바꿔 끼울 pdfminer 이름이 없어지면 install()이 PDFGuardUnavailableError로 실패한다. 그냥
   대입하면 pdfminer가 이름을 바꿨을 때 오류 없이 상한이 꺼진다
 - CCITTFax 같은 순수 파이썬 디코더의 CPU 시간은 막지 못한다. 이런 위험까지 막으려면 메모리·시간
   상한을 건 별도 프로세스에서 파싱해야 한다(M-3)
 """
 
+import bisect
 import itertools
 import logging
 import threading
@@ -41,14 +42,15 @@ from typing import Any
 from pdfminer import pdftypes
 from pdfminer.converter import PDFLayoutAnalyzer
 from pdfminer.lzw import LZWDecoder
-from pdfminer.pdfdocument import PDFDocument
+from pdfminer.pdfdocument import PDFDocument, PDFXRefFallback
 from pdfminer.pdfpage import PDFPage
-from pdfminer.pdfparser import PDFStreamParser
-from pdfminer.psparser import PSEOF
+from pdfminer.pdfparser import PDFParser, PDFStreamParser
+from pdfminer.psparser import LIT, PSEOF
 
 logger = logging.getLogger(__name__)
 _state = threading.local()
 _STEP = 1024 * 1024  # 한 번에 풀어 내는 양
+_LITERAL_OBJSTM = LIT("ObjStm")  # pdfminer는 이름 객체를 하나씩만 만들어 is로 비교한다
 
 
 class PDFLimitError(ValueError):
@@ -106,35 +108,70 @@ def check_page_count(document: PDFDocument, max_pages: int) -> int:
 @contextmanager
 def object_budget(max_objects: int) -> Iterator[None]:
     """이 블록 안(같은 스레드)에서 PDF 하나가 선언할 수 있는 객체 수를 max_objects로 제한한다.
-    check_object_count()와 객체 스트림 파싱이 이 예산에서 뺀다."""
-    previous = (getattr(_state, "objects_limit", None), getattr(_state, "objects_used", 0))
-    _state.objects_limit, _state.objects_used = max_objects, 0
+    check_object_count()가 이 값을 쓰고, 객체 스트림은 이 블록 안에서만 선언한 만큼만 파싱한다."""
+    previous = getattr(_state, "objects_limit", None)
+    _state.objects_limit = max_objects
     try:
         yield
     finally:
-        _state.objects_limit, _state.objects_used = previous
+        _state.objects_limit = previous
 
 
-def _charge_objects(count: int) -> None:
-    _state.objects_used += max(count, 0)
-    if _state.objects_used > _state.objects_limit:
-        raise PDFObjectLimitError(f"the PDF declares more than {_state.objects_limit:,} objects")
+# xref 구획들이 선언한 항목 수의 합계는 객체 상한의 이 배수까지 받는다. 증분 저장은 구획마다
+# 바뀐 객체만(드물게는 전부) 다시 적으므로 합계가 객체 수보다 크다. 쪽이 없는 PDF에서 pdfminer는
+# 구획마다 선언된 번호를 다시 훑으므로, 합계를 묶지 않으면 구획을 늘려 훑는 횟수를 키울 수 있다
+XREF_ENTRIES_PER_OBJECT = 2
 
 
 def check_object_count(document: PDFDocument) -> None:
-    """xref들이 선언한 객체 수를 object_budget()에서 뺀다. 넘으면 PDFObjectLimitError.
+    """xref들이 선언한 객체 수가 object_budget()의 상한을 넘으면 PDFObjectLimitError.
 
-    pdfplumber.open() 직후, 쪽을 세기 전에 한 번 부른다. xref 스트림은 /Index에 적힌 수만큼
-    객체가 있다고 선언할 뿐 데이터가 없어도 되므로, 실제로 훑어 보기 전에 선언된 수로 거절한다.
+    pdfplumber.open() 직후, 쪽을 세기 전에 한 번 부른다. xref 스트림은 /Index(없으면
+    [0 /Size])에 적힌 수만큼 객체가 있다고 선언할 뿐 데이터가 없어도 되므로, 실제로 훑어 보기
+    전에 선언된 수로 거절한다.
+
+    - 서로 다른 객체 번호를 센다. 증분 저장한 파일은 구획마다 같은 번호를 다시 적는다
+    - 객체 스트림 안의 객체도 xref에 한 번씩 적혀 있으므로 스트림의 /N은 따로 세지 않는다
+    - 구획들이 선언한 합계는 상한의 XREF_ENTRIES_PER_OBJECT배까지다
     """
-    if getattr(_state, "objects_limit", None) is None:
+    limit = getattr(_state, "objects_limit", None)
+    if limit is None:
         raise RuntimeError("check_object_count() must be called inside object_budget()")
+    entries = 0
+    spans: list[tuple[int, int]] = []  # xref 스트림이 선언한 번호 구간 [시작, 끝)
+    listed: set[int] = set()  # 고전 xref 표·복구한 xref에 실제로 적힌 번호
     for xref in document.xrefs:
         ranges = getattr(xref, "ranges", None)  # PDFXRefStream: [(시작 번호, 개수), ...]
         if ranges is not None:
-            _charge_objects(sum(max(count, 0) for _, count in ranges))
+            found = [(first, first + count) for first, count in ranges if count > 0]
+            entries += sum(last - first for first, last in found)
+            spans.extend(found)
         else:  # PDFXRef·PDFXRefFallback: 파일에서 실제로 읽은 항목
-            _charge_objects(len(xref.get_objids()))
+            objids = xref.get_objids()
+            entries += len(objids)
+            if entries <= XREF_ENTRIES_PER_OBJECT * limit:
+                listed.update(objids)
+        if entries > XREF_ENTRIES_PER_OBJECT * limit:
+            raise PDFObjectLimitError(
+                f"the PDF declares more than {limit:,} objects (its xref sections list more "
+                f"than {XREF_ENTRIES_PER_OBJECT * limit:,} entries)"
+            )
+    merged: list[tuple[int, int]] = []
+    for first, last in sorted(spans):
+        if merged and first <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], last))
+        else:
+            merged.append((first, last))
+    starts = [first for first, _ in merged]
+
+    def in_spans(objid: int) -> bool:
+        index = bisect.bisect_right(starts, objid) - 1
+        return index >= 0 and objid < merged[index][1]
+
+    distinct = sum(last - first for first, last in merged)
+    distinct += sum(1 for objid in listed if not in_spans(objid))
+    if distinct > limit:
+        raise PDFObjectLimitError(f"the PDF declares more than {limit:,} objects")
 
 
 @contextmanager
@@ -304,26 +341,79 @@ def _rldecode(data: bytes) -> bytes:
 _original_get_objects = _require(PDFDocument, "_get_objects")
 
 
+def _declared_count(stream: pdftypes.PDFStream) -> int:
+    """객체 스트림이 선언한 객체 수(/N). 없거나 정수가 아니면 0."""
+    return max(pdftypes.int_value(stream.get("N", 0)), 0)
+
+
+def _leading_objects(data: bytes, document: PDFDocument | None, count: int) -> list[object]:
+    """객체 스트림 내용의 앞에서 값 count개까지만 파싱한다 (내용이 먼저 끝나면 거기까지)."""
+    parser = PDFStreamParser(data)
+    if document is not None:
+        parser.set_document(document)
+    objs: list[object] = []
+    try:
+        for _ in range(count):
+            objs.append(parser.nextobject()[1])
+    except PSEOF:
+        pass
+    return objs
+
+
 def _get_objects(self: PDFDocument, stream: pdftypes.PDFStream) -> tuple[list[object], int]:
-    """pdfminer _get_objects와 같되 선언한 객체까지만 파싱하고 그 수를 객체 예산에서 뺀다.
+    """pdfminer _get_objects와 같되 선언한 객체까지만 파싱한다.
 
     스트림 내용은 번호·위치 쌍 N개(값 2N개) 뒤에 객체 N개다. pdfminer는 i번째 객체를
     objs[2N + i]로 꺼내므로 앞의 3N개만 있으면 된다. /N이 없거나 정수가 아니면 0으로 본다
     (pdfminer는 이때도 끝까지 파싱한다. 그런 스트림의 객체는 여기서는 찾지 못한다).
+    N은 객체 예산에서 빼지 않는다: 스트림 안의 객체는 xref에 이미 한 번씩 적혀 있다.
     """
     if getattr(_state, "objects_limit", None) is None:
         return _original_get_objects(self, stream)
-    declared = max(pdftypes.int_value(stream.get("N", 0)), 0)
-    _charge_objects(declared)
-    parser = PDFStreamParser(stream.get_data())
-    parser.set_document(self)
-    objs: list[object] = []
-    try:
-        for _ in range(3 * declared):
-            objs.append(parser.nextobject()[1])
-    except PSEOF:
-        pass
-    return objs, declared
+    declared = _declared_count(stream)
+    return _leading_objects(stream.get_data(), self, 3 * declared), declared
+
+
+# ---- xref 복구 ----
+
+_original_fallback_load = _require(PDFXRefFallback, "load")
+
+
+def _fallback_load(self: PDFXRefFallback, parser: PDFParser) -> None:
+    """pdfminer PDFXRefFallback.load와 같되 객체 스트림에서 번호·위치 쌍(값 2N개)만 읽는다.
+
+    startxref가 틀리거나 xref가 깨진 PDF는 pdfminer가 파일을 처음부터 훑어 "번호 세대 obj" 줄로
+    xref를 다시 만든다. 그때 객체 스트림은 _get_objects를 거치지 않고 끝까지 파싱해서, 선언한
+    객체 뒤에 "[]"를 채운 2.7KB PDF가 9.3초·113MB를 썼다(PR #19 2차 리뷰에서 재현). 복구에 쓰는
+    것은 스트림 앞의 객체 번호들뿐이다. 아래는 pdfminer.six 20260107의 load를 옮긴 것이고,
+    달라진 곳은 스트림을 읽는 한 줄이다.
+    """
+    if getattr(_state, "objects_limit", None) is None:
+        _original_fallback_load(self, parser)
+        return
+    parser.seek(0)
+    while True:
+        try:
+            pos, line_bytes = parser.nextline()
+        except PSEOF:
+            break
+        if line_bytes.startswith(b"trailer"):
+            parser.seek(pos)
+            self.load_trailer(parser)
+            break
+        match = self.PDFOBJ_CUE.match(line_bytes.decode("latin-1"))
+        if not match:
+            continue
+        objid, genno = int(match.group(1)), int(match.group(2))
+        self.offsets[objid] = (None, pos, genno)
+        # 객체 스트림이면 그 안의 객체 번호도 등록한다
+        parser.seek(pos)
+        _, obj = parser.nextobject()
+        if isinstance(obj, pdftypes.PDFStream) and obj.get("Type") is _LITERAL_OBJSTM:
+            declared = _declared_count(obj)
+            numbers = _leading_objects(obj.get_data(), None, 2 * declared)
+            for index in range(min(declared, len(numbers) // 2)):
+                self.offsets[numbers[index * 2]] = (objid, index, 0)  # type: ignore[index]
 
 
 # ---- 레이아웃 객체 수 ----
@@ -379,6 +469,7 @@ def install() -> None:
         (pdftypes, "lzwdecode", _lzwdecode),
         (pdftypes, "rldecode", _rldecode),
         (PDFDocument, "_get_objects", _get_objects),
+        (PDFXRefFallback, "load", _fallback_load),
         (PDFLayoutAnalyzer, "begin_page", _begin_page),
         (PDFLayoutAnalyzer, "render_char", _render_char),
         (PDFLayoutAnalyzer, "paint_path", _paint_path),

@@ -232,7 +232,7 @@ def empty_paragraphs(count: int) -> str:
 
 
 def test_hwpx_default_limits():
-    assert loaders.HWPX_MAX_EVENTS == 1_000_000
+    assert loaders.HWPX_MAX_EVENTS == 10_000_000
     assert loaders.HWPX_MAX_DEPTH == 200
     assert loaders.HWPX_MAX_SECTIONS == 1_000
 
@@ -356,7 +356,7 @@ def test_hwpx_empty_elements_do_not_build_a_tree(tmp_path):
 
 def test_hwpx_rejects_one_huge_start_tag_before_its_attributes_are_built(tmp_path):
     # 이벤트 수만으로는 부족했다: 파서는 시작 태그를 끝까지 읽은 뒤에야 속성 사전을 만들어 넘기므로,
-    # 속성 80만 개짜리 태그 하나는 이벤트 상한(100만) 아래에서 269MB를 쓰고 통과했다.
+    # 속성 80만 개짜리 태그 하나는 이벤트 상한 아래에서 269MB를 쓰고 통과했다.
     # 파서가 이벤트 없이 삼킨 바이트(끝나지 않은 토큰)에 상한을 둔다
     assert loaders.HWPX_MAX_TOKEN_BYTES == 256 * 1024
     attrs = "".join(f' a{i:x}=""' for i in range(200_000))
@@ -398,3 +398,60 @@ def test_hwpx_rejects_too_many_distinct_names(tmp_path, monkeypatch):
         path = write_hwpx(tmp_path / "names.hwpx", {"section0.xml": section_xml(body + extra)})
         with pytest.raises(DocumentTooLargeError, match="more than 8 distinct"):
             load_document(path, meta_terms, "bank")
+
+
+LINESEG = (
+    '<hp:linesegarray><hp:lineseg textpos="0" vertpos="0" vertsize="1000" textheight="1000" '
+    'baseline="850" spacing="600" horzpos="0" horzsize="42520" flags="393216"/></hp:linesegarray>'
+)
+
+
+def real_paragraph(text: str) -> str:
+    """한컴오피스가 쓰는 모양의 문단: 속성과 줄 배치 정보(linesegarray)가 붙는다."""
+    return (
+        '<hp:p id="0" paraPrIDRef="3" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+        f'<hp:run charPrIDRef="5"><hp:t>{escape(text)}</hp:t></hp:run>{LINESEG}</hp:p>'
+    )
+
+
+def real_table(rows: int, cols: int) -> str:
+    """한컴오피스가 쓰는 모양의 표. 칸 하나가 파서 이벤트 55개쯤이다(요소 10 + 속성 44 + 글자 1)."""
+
+    def cell(row: int, col: int) -> str:
+        return (
+            '<hp:tc name="" header="0" hasMargin="0" protect="0" editable="0" dirty="0" '
+            'borderFillIDRef="4"><hp:subList id="" textDirection="HORIZONTAL" lineWrap="BREAK" '
+            'vertAlign="CENTER" linkListIDRef="0" linkListNextIDRef="0" textWidth="0" '
+            'textHeight="0" hasTextRef="0" hasNumRef="0">'
+            + real_paragraph(f"행{row}열{col} 금리 {row % 7}.{col:02d}%")
+            + f'</hp:subList><hp:cellAddr colAddr="{col}" rowAddr="{row}"/>'
+            '<hp:cellSpan colSpan="1" rowSpan="1"/><hp:cellSz width="7000" height="1500"/>'
+            '<hp:cellMargin left="510" right="510" top="141" bottom="141"/></hp:tc>'
+        )
+
+    body = "".join(
+        "<hp:tr>" + "".join(cell(r, c) for c in range(cols)) + "</hp:tr>" for r in range(rows)
+    )
+    return (
+        '<hp:p id="0" paraPrIDRef="0" styleIDRef="0" pageBreak="0" columnBreak="0" merged="0">'
+        '<hp:run charPrIDRef="0"><hp:tbl id="1" zOrder="0" numberingType="TABLE" '
+        f'textWrap="TOP_AND_BOTTOM" pageBreak="CELL" repeatHeader="1" rowCnt="{rows}" '
+        f'colCnt="{cols}" cellSpacing="0" borderFillIDRef="3" noAdjust="0">'
+        '<hp:sz width="42000" widthRelTo="ABSOLUTE" height="3000" heightRelTo="ABSOLUTE" '
+        f'protect="0"/>{body}</hp:tbl><hp:t>표 뒤 글자</hp:t></hp:run></hp:p>'
+    )
+
+
+def test_hwpx_large_ordinary_table_is_not_rejected(tmp_path):
+    # PR #19 2차 리뷰: 이벤트 상한 100만은 표 위주의 정상 문서를 약 1만 8천 칸부터 막았다
+    # (3,500행 × 6열에서 거절). 칸 하나가 이벤트 55개쯤이라 금리표가 긴 문서는 쉽게 넘는다
+    rows, cols = 3500, 6
+    body = real_paragraph("머리") + real_table(rows, cols)
+    path = write_hwpx(tmp_path / "table.hwpx", {"section0.xml": section_xml(body)})
+    lines = lines_of(path)
+    # 줄 순서는 문단이 시작한 순서: 머리, 표를 품은 문단(표 뒤 글자), 칸들(행 → 열)
+    assert lines[:3] == ["머리", "표 뒤 글자", "행0열0 금리 0.00%"]
+    assert lines[2:] == [
+        f"행{r}열{c} 금리 {r % 7}.{c:02d}%" for r in range(rows) for c in range(cols)
+    ]
+    assert len(lines) == 2 + rows * cols
