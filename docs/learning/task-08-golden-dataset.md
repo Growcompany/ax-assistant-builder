@@ -58,7 +58,7 @@ LLM에게 문서를 주고 질문을 만들라고 하면 **문서 문장을 그�
 
 1. `corpus/bank/golden.jsonl` 몇 줄: lookup(조항 근거), table(문서 단위), multi_doc(근거 2개), out_of_scope(빈 근거)를 하나씩 본다.
 2. `src/axbuilder/eval/dataset.py`: `Evidence` → `GoldItem` → `load_golden`(줄 번호 오류, 빈 파일) → `validate_golden`(계획의 규칙 4가지 + 라벨 형식·근거 중복·빈 문구).
-3. `tests/eval/test_dataset.py`: 앞쪽은 규칙별 테스트다. 맨 아래 `chunk_corpus`(받은 원문이 없으면 저장소 문서만 나눔)와 두 대조 테스트가 Task 9 `matches()`와 같은 규칙(`hits`)으로 실제 청크를 확인한다. `hits`는 Task 9에서 `matches()`가 생기면 그것으로 바꾼다.
+3. `tests/eval/test_dataset.py`: 앞쪽은 규칙별 테스트다. 맨 아래 `chunk_corpus`(받은 원문이 없으면 저장소 문서만 나눔)와 두 대조 테스트가 평가 실행기와 같은 `axbuilder.eval.metrics.matches()`로 실제 청크를 확인한다(Task 8에서는 같은 규칙의 임시 함수 `hits`였고, Task 9에서 `matches()`로 바꿨다).
 4. `docs/eval/golden-v0-review-sheet.md`: 사람이 무엇을 보는지(정답·근거·말투 세 칸)를 확인한다.
 
 ## 면접 예상 질문과 답
