@@ -98,6 +98,7 @@ def test_list_workspaces_sorted_by_id_with_summary_fields(client):
         "name": "알파",
         "industry": "finance",
         "roles": WS["roles"],
+        "llm_model": None,
         "documents": 0,
         "index": {"state": "none", "chunks": None},
     }
@@ -197,7 +198,16 @@ def test_workspace_detail_lists_documents(client):
     r = client.get("/workspaces/bank")
     assert r.status_code == 200
     body = r.json()
-    assert set(body) == {"id", "name", "industry", "roles", "documents", "index", "documents_list"}
+    assert set(body) == {
+        "id",
+        "name",
+        "industry",
+        "roles",
+        "llm_model",
+        "documents",
+        "index",
+        "documents_list",
+    }
     assert body["id"] == "bank" and body["name"] == WS["name"] and body["roles"] == WS["roles"]
     assert body["documents"] == 2 and body["index"] == {"state": "none", "chunks": None}
     assert body["documents_list"] == [  # doc_id 오름차순

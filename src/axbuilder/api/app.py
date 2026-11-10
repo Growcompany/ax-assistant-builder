@@ -1,7 +1,7 @@
 """REST API: 워크스페이스 만들기 → 문서 올리기 → 색인 → 질문.
 
 create_app(settings, llm=None, embedder=None)이 앱을 만든다. 테스트는 FakeLLM·HashEmbedder를
-넣고, 실행용 main.py는 설정을 따른다(LLM은 get_llm, 임베딩 모델은 처음 필요할 때 불러온다).
+넣고, 실행용 main.py는 설정을 따른다(임베딩 모델은 처음 필요할 때 불러온다).
 
 저장 위치 (data_dir/workspaces/{id}/):
   workspace.yaml               워크스페이스 설정 (WorkspaceStore)
@@ -18,6 +18,11 @@ POST /index를 다시 불러야 질문에 반영된다.
 
 화면(static/)도 이 앱이 내준다: GET /은 static/index.html, GET /static/…은 그 폴더의 파일.
 화면이 쓰는 조회 API(GET /workspaces, GET /workspaces/{id})는 색인을 열지 않고 파일만 읽는다.
+
+LLM은 워크스페이스마다 고를 수 있다(workspace.yaml의 llm_model, 없으면 서버 기본 모델). 클라이언트는
+모델 이름별로 하나씩 만들어 다시 쓴다. cloud 모드에서는 워크스페이스 설정과 무관하게 설정된 Claude
+모델만 쓴다. create_app에 llm을 주면(테스트) 모든 모델에 그것을 쓰고, llm_factory를 주면 모델
+이름으로 클라이언트를 만든다.
 """
 
 import functools
@@ -31,24 +36,38 @@ import threading
 import time
 import unicodedata
 import uuid
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, BinaryIO, Literal
 
+import httpx
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import AfterValidator, BaseModel, Field, StringConstraints, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+)
 from starlette.datastructures import MutableHeaders
 
 from axbuilder.corpus import DOC_ID, load_sources, source_file
 from axbuilder.generation.answer import answer
 from axbuilder.generation.llm import (
+    ClaudeClient,
     LLMClient,
     LLMUnavailableError,
-    get_llm,
+    OllamaClient,
+    OllamaModel,
+    OllamaNotRunningError,
+    has_ollama_model,
+    list_ollama_models,
     strip_url_credentials,
 )
 from axbuilder.ingest.chunking import chunk_document
@@ -65,6 +84,7 @@ from axbuilder.workspace import (
     WorkspaceExistsError,
     WorkspaceNotFoundError,
     WorkspaceStore,
+    is_valid_llm_model_name,
     is_valid_workspace_id,
 )
 
@@ -229,6 +249,36 @@ class AskResponse(BaseModel):
     refused: bool
     latency_ms: float  # 검색 + LLM 생성 시간
     passages: list[Passage]  # passages[i]는 citations[i]의 원문 (같은 순서, 같은 길이)
+    # 답한 모델. LLM이 알려 준 이름(Claude는 대체 모델이 답하면 그 이름)이고, LLM을 부르지 않고
+    # 거절했으면 이 워크스페이스가 쓰는 모델 이름
+    model: str
+
+
+class ModelInfo(OllamaModel):
+    """고를 수 있는 LLM 모델 하나: name, size_bytes, parameter_size, quantization."""
+
+
+class ModelList(BaseModel):
+    available: bool  # 모델 목록을 읽을 수 있었는가 (local: Ollama가 켜져 있고 응답이 정상)
+    default: str  # 워크스페이스에 llm_model이 없을 때 쓰는 서버 기본 모델
+    models: list[ModelInfo]  # 이름순
+    hint: str | None  # 사용자가 다음에 할 일(없으면 None)
+
+
+class WorkspacePatch(BaseModel):
+    """PATCH /workspaces/{id} 본문. 바꿀 수 있는 것은 모델뿐이다. null은 서버 기본 모델로."""
+
+    # 모르는 필드(name, roles)를 조용히 무시하면 바뀐 줄 안다
+    model_config = ConfigDict(extra="forbid")
+
+    llm_model: str | None  # 기본값 없음: 빈 본문({})은 422
+
+    @field_validator("llm_model")
+    @classmethod
+    def _check_llm_model(cls, value: str | None) -> str | None:
+        if value is not None and not is_valid_llm_model_name(value):
+            raise ValueError("invalid model name: need ^[A-Za-z0-9][A-Za-z0-9._/:-]{0,127}$")
+        return value
 
 
 class IndexStatus(BaseModel):
@@ -359,9 +409,27 @@ def _signature_matches(suffix: str, head: bytes, has_nul: bool) -> bool:
 class _Service:
     """앱의 상태: 저장소, LLM, 임베더(지연 로딩), 워크스페이스별 색인 캐시와 잠금."""
 
-    def __init__(self, settings: Settings, llm: LLMClient | None, embedder: Embedder | None):
+    def __init__(
+        self,
+        settings: Settings,
+        llm: LLMClient | None,
+        embedder: Embedder | None,
+        llm_factory: Callable[[str], LLMClient] | None = None,
+        ollama_transport: httpx.BaseTransport | None = None,
+    ):
         self.store = WorkspaceStore(settings.data_dir / "workspaces")
-        self.llm = llm if llm is not None else get_llm(settings)
+        self._cloud = settings.llm_mode == "cloud"
+        self._ollama_url = settings.ollama_url
+        self._ollama_transport = ollama_transport
+        self.default_model = settings.claude_model if self._cloud else settings.local_model
+        self._fixed_llm = llm  # 주입된 LLM(테스트): 모델 이름과 무관하게 이것이 답한다
+        self._llm_factory = llm_factory if llm_factory is not None else self._make_llm
+        self._llm_lock = threading.Lock()
+        self._llms: dict[str, LLMClient] = {}
+        if llm is None:
+            # 기본 모델의 클라이언트는 시작할 때 만든다: 쓸 수 없는 AXB_OLLAMA_URL은 첫 질문이
+            # 아니라 서버를 띄울 때 알린다
+            self._llms[self.default_model] = self._llm_factory(self.default_model)
         self._embed_model = settings.embed_model
         self._embedder = embedder
         # 색인 정보에 남겨, 서버를 다시 켰을 때 같은 임베더인지 비교한다. 넣어 준 임베더도 모델
@@ -380,6 +448,87 @@ class _Service:
         # Qdrant 로컬 모드는 같은 폴더를 한 클라이언트만 열 수 있고, 동시 접근에 안전하지 않다
         self._locks: dict[str, threading.Lock] = {}
         self._indexes: dict[str, _LoadedIndex] = {}
+
+    # ---- LLM ----
+
+    def _make_llm(self, model: str) -> LLMClient:
+        if self._cloud:
+            return ClaudeClient(model)
+        # 타임아웃·think:false·num_ctx는 OllamaClient가 정한다: 어느 모델이든 같은 설정
+        return OllamaClient(model, self._ollama_url, transport=self._ollama_transport)
+
+    def model_name(self, ws: Workspace) -> str:
+        """이 워크스페이스가 답할 때 쓰는 모델. cloud 모드에서는 워크스페이스의 llm_model(로컬
+        모델 이름)을 Claude API에 보내지 않고 설정된 Claude 모델을 쓴다."""
+        if self._cloud or ws.llm_model is None:
+            return self.default_model
+        return ws.llm_model
+
+    def llm_for(self, ws: Workspace) -> LLMClient:
+        if self._fixed_llm is not None:
+            return self._fixed_llm
+        name = self.model_name(ws)
+        with self._llm_lock:  # 모델 이름별로 하나만 만들어 다시 쓴다(HTTP 연결 재사용)
+            client = self._llms.get(name)
+            if client is None:
+                client = self._llms[name] = self._llm_factory(name)
+            return client
+
+    def models(self) -> ModelList:
+        default = self.default_model
+        if self._cloud:
+            return ModelList(
+                available=True,
+                default=default,
+                models=[ModelInfo(name=default)],
+                hint="클라우드 모드(AXB_LLM_MODE=cloud)에서는 설정된 Claude 모델로만 답합니다. "
+                "워크스페이스별로 모델을 고를 수 없습니다",
+            )
+        try:
+            installed = list_ollama_models(self._ollama_url, transport=self._ollama_transport)
+        except OllamaNotRunningError:
+            return ModelList(
+                available=False,
+                default=default,
+                models=[],
+                hint="Ollama가 켜져 있지 않습니다. Ollama를 설치하고 실행한 뒤 다시 확인하세요: "
+                "ollama serve",
+            )
+        except LLMUnavailableError as e:
+            # 받은 응답·예외 글자는 화면에 내보내지 않는다(서버 로그에만)
+            logger.warning("could not list Ollama models: %s", e)
+            return ModelList(
+                available=False,
+                default=default,
+                models=[],
+                hint="Ollama에서 모델 목록을 읽지 못했습니다. Ollama 상태와 AXB_OLLAMA_URL을 "
+                "확인한 뒤 다시 확인하세요",
+            )
+        if not installed:
+            hint = f"설치된 모델이 없습니다. 터미널에서 모델을 받으세요: ollama pull {default}"
+        elif not has_ollama_model(installed, default):
+            hint = (
+                f"기본 모델 '{default}'이 설치되어 있지 않습니다. 다른 모델을 고르거나 "
+                f"터미널에서 받으세요: ollama pull {default}"
+            )
+        else:
+            hint = None
+        return ModelList(
+            available=True,
+            default=default,
+            models=[ModelInfo(**model.model_dump()) for model in installed],
+            hint=hint,
+        )
+
+    def set_llm_model(self, ws: Workspace, llm_model: str | None) -> WorkspaceSummary:
+        with self.lock(ws.id):
+            try:
+                # 잠금 안에서 다시 읽는다: 그 사이 바뀐 다른 필드를 덮어쓰지 않는다
+                current = self.store.get(ws.id)
+                updated = self.store.update(current.model_copy(update={"llm_model": llm_model}))
+            except WorkspaceNotFoundError:
+                raise HTTPException(404, "워크스페이스를 찾을 수 없습니다") from None
+        return self.summary(updated)
 
     # ---- 공통 ----
 
@@ -743,7 +892,7 @@ class _Service:
         # 권한 필터(역할 → 접근 등급)는 answer()가 검색 단계에서 건다. 볼 수 없는 문서는
         # 검색 결과에도, LLM 프롬프트에도 들어가지 않는다
         result = answer(
-            request.question, _WorkspaceRetriever(self, ws.id), self.llm, ws, request.role
+            request.question, _WorkspaceRetriever(self, ws.id), self.llm_for(ws), ws, request.role
         )
         # 원문은 이 질문에서 이 역할로 검색된 청크(result.retrieved)에서만 찾는다. 색인 전체에서
         # chunk_id로 찾지 않는다: 권한 밖 문서의 본문이 나갈 길을 만들지 않는다
@@ -757,6 +906,7 @@ class _Service:
                 Passage(chunk_id=citation.chunk_id, text=texts[citation.chunk_id])
                 for citation in result.citations
             ],
+            model=result.llm.model if result.llm is not None else self.model_name(ws),
         )
 
 
@@ -916,12 +1066,21 @@ class _RejectForeignHost:
 
 
 def create_app(
-    settings: Settings, llm: LLMClient | None = None, embedder: Embedder | None = None
+    settings: Settings,
+    llm: LLMClient | None = None,
+    embedder: Embedder | None = None,
+    *,
+    llm_factory: Callable[[str], LLMClient] | None = None,
+    ollama_transport: httpx.BaseTransport | None = None,
 ) -> FastAPI:
-    """llm이 없으면 get_llm(settings), embedder가 없으면 SentenceTransformerEmbedder(설정의
-    embed_model)를 쓴다. 임베딩 모델은 처음 색인하거나 질문할 때 불러온다(서버가 빨리 뜨고,
-    /health는 GPU 없이도 답한다)."""
-    service = _Service(settings, llm, embedder)
+    """llm이 없으면 설정대로 모델별 클라이언트(local: OllamaClient, cloud: ClaudeClient)를 만들고,
+    embedder가 없으면 SentenceTransformerEmbedder(설정의 embed_model)를 쓴다. 임베딩 모델은 처음
+    색인하거나 질문할 때 불러온다(서버가 빨리 뜨고, /health는 GPU 없이도 답한다).
+
+    테스트용: llm을 주면 모든 워크스페이스가 그것으로 답한다. llm_factory(모델 이름)를 주면 모델별
+    클라이언트를 그것으로 만든다. ollama_transport는 Ollama로 가는 요청(모델 목록, 기본 공장의
+    OllamaClient)에 쓴다."""
+    service = _Service(settings, llm, embedder, llm_factory, ollama_transport)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -977,6 +1136,14 @@ def create_app(
         if not index.is_file():
             raise HTTPException(404, "화면 파일(static/index.html)이 없습니다")
         return FileResponse(index, media_type="text/html")
+
+    @app.get("/models")
+    def list_models() -> ModelList:
+        return service.models()
+
+    @app.patch("/workspaces/{workspace_id}")
+    def patch_workspace(workspace_id: str, patch: WorkspacePatch) -> WorkspaceSummary:
+        return service.set_llm_model(service.workspace(workspace_id), patch.llm_model)
 
     @app.get("/workspaces")
     def list_workspaces() -> list[WorkspaceSummary]:

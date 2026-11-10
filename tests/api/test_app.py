@@ -201,7 +201,7 @@ def test_health(client):
 
 def test_create_workspace_201_then_409(client, settings):
     r = client.post("/workspaces", json=WS)
-    assert r.status_code == 201 and r.json() == WS
+    assert r.status_code == 201 and r.json() == {**WS, "llm_model": None}
     assert (settings.data_dir / "workspaces" / "bank" / "workspace.yaml").is_file()
     assert client.post("/workspaces", json=WS).status_code == 409
 
@@ -231,7 +231,7 @@ def test_ask_response_shape(client):
     setup_indexed(client)
     r = ask(client)
     body = r.json()
-    assert set(body) == {"answer", "citations", "refused", "latency_ms", "passages"}
+    assert set(body) == {"answer", "citations", "refused", "latency_ms", "passages", "model"}
     assert body["refused"] is False and body["latency_ms"] >= 0
     assert body["answer"] == "보호한도는 대통령령으로 정합니다 [1]."
     assert set(body["citations"][0]) == {"chunk_id", "doc_id", "title", "page", "article"}
