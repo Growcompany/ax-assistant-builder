@@ -8,7 +8,7 @@
   - `dev`: pytest, ruff (테스트·린트 도구)
   - `ml`: sentence-transformers (PyTorch를 끌어오는 무거운 묶음)
 - pytest에 `slow` 마커를 등록하고 기본 실행에서 제외한다 (`addopts = "-m 'not slow'"`).
-- `.gitignore`에 `data/workspaces/`를 추가해 워크스페이스 데이터·색인이 커밋되지 않게 한다.
+- `.gitignore`의 `**/data/workspaces/` 줄로 워크스페이스 데이터·색인이 커밋되지 않게 한다(Task 0에서는 `data/workspaces/`였고, Task 3에서 어느 깊이에 있어도 제외되도록 `**/`를 붙였다).
 - CI의 `actions/checkout`, `actions/setup-python`을 v7로 올리고, CI는 `.[dev]`만 설치한다.
 
 ## 핵심 개념
@@ -47,7 +47,7 @@ PR의 base를 `main`이 아니라 **바로 앞 작업의 브랜치**로 두는 �
 2. `src/axbuilder/__init__.py` — 패키지 이름과 버전
 3. `tests/test_smoke.py` — 패키지가 import되고 버전이 맞는지만 보는 최소 테스트
 4. `.github/workflows/ci.yml` — 설치(`.[dev]`) → 린트 → 테스트 순서
-5. `.gitignore` — `data/workspaces/` 줄
+5. `.gitignore` — `**/data/workspaces/` 줄
 
 ## 면접 예상 질문과 답
 
