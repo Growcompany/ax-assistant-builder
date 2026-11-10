@@ -1,6 +1,7 @@
 """LLM 클라이언트: 로컬(Ollama)과 클라우드(Claude)를 같은 LLMClient 모양 뒤에 둔다."""
 
 import logging
+import re
 import time
 from typing import Protocol
 
@@ -42,6 +43,18 @@ class LLMUnavailableError(RuntimeError):
     """LLM을 부를 수 없다(서버 꺼짐, 시간 초과, 인증 실패 등). 메시지에 해결 방법을 담는다."""
 
 
+# URL의 계정 정보: "://" 뒤부터 경로 전의 마지막 "@"까지 (비밀번호에 "@"가 그대로 든 경우 포함)
+_URL_USERINFO = re.compile(r"(?<=://)[^\s/?#]*@")
+
+
+def strip_url_credentials(text: str) -> str:
+    """text 안 URL의 계정 정보(http://user:pass@host → http://host)를 지운다.
+
+    오류 메시지는 API 응답(503)과 로그로 나간다. AXB_OLLAMA_URL에 계정 정보를 넣어 쓰면 그대로 샌다.
+    """
+    return _URL_USERINFO.sub("", text)
+
+
 class OllamaClient:
     def __init__(
         self,
@@ -52,8 +65,13 @@ class OllamaClient:
     ) -> None:
         self.model = model
         self.base_url = base_url
+        self._shown_url = strip_url_credentials(base_url)  # 오류 메시지용
         self.timeout = timeout
-        self._http = httpx.Client(base_url=base_url, timeout=timeout, transport=transport)
+        # trust_env=False: HTTP(S)_PROXY·ALL_PROXY 환경변수를 따르지 않는다. 따르면 로컬 Ollama로
+        # 가야 할 프롬프트(내부 문서 발췌)가 회사·공격자 프록시로 나간다(.netrc 인증도 쓰지 않는다)
+        self._http = httpx.Client(
+            base_url=base_url, timeout=timeout, transport=transport, trust_env=False
+        )
 
     def generate(self, system: str, user: str, max_tokens: int = 2048) -> LLMResponse:
         payload = {
@@ -73,7 +91,7 @@ class OllamaClient:
             response.raise_for_status()
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             raise LLMUnavailableError(
-                f"Ollama 서버({self.base_url})에 연결할 수 없습니다. "
+                f"Ollama 서버({self._shown_url})에 연결할 수 없습니다. "
                 "Ollama가 실행 중인지 확인하세요: ollama serve"
             ) from e
         except httpx.TimeoutException as e:
@@ -91,7 +109,8 @@ class OllamaClient:
             raise LLMUnavailableError(f"Ollama 오류 {status}: {detail}") from e
         except httpx.TransportError as e:
             raise LLMUnavailableError(
-                f"Ollama 서버({self.base_url})와 통신하지 못했습니다: {e}. "
+                f"Ollama 서버({self._shown_url})와 통신하지 못했습니다: "
+                f"{strip_url_credentials(str(e))}. "
                 "AXB_OLLAMA_URL과 Ollama 상태를 확인하세요"
             ) from e
         latency_ms = (time.perf_counter() - start) * 1000

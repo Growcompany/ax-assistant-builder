@@ -11,6 +11,7 @@ ENV_NAMES = [
     "AXB_OLLAMA_URL",
     "AXB_CLAUDE_MODEL",
     "AXB_EMBED_MODEL",
+    "AXB_ALLOWED_HOSTS",
 ]
 
 
@@ -66,3 +67,21 @@ def test_api_key_is_not_kept_in_settings(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-secret")
     s = Settings.from_env()
     assert "sk-test-secret" not in repr(s) and "sk-test-secret" not in s.model_dump_json()
+
+
+def test_allowed_hosts_default_is_loopback_only():
+    assert Settings.from_env().allowed_hosts == ("127.0.0.1", "localhost", "[::1]")
+
+
+def test_allowed_hosts_from_env_is_comma_separated_and_replaces_default(monkeypatch):
+    monkeypatch.setenv("AXB_ALLOWED_HOSTS", " 127.0.0.1, AXB.Internal ,,[::1] ")
+    assert Settings.from_env().allowed_hosts == ("127.0.0.1", "axb.internal", "[::1]")
+
+
+@pytest.mark.parametrize(
+    "bad", ["*", "http://localhost", "localhost:8000", "a b", "::1", " , ", "exa_mple.com", "-a"]
+)
+def test_allowed_hosts_rejects_wildcards_ports_and_urls(monkeypatch, bad):
+    monkeypatch.setenv("AXB_ALLOWED_HOSTS", bad)
+    with pytest.raises(ValueError):
+        Settings.from_env()

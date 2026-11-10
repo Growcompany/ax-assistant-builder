@@ -24,6 +24,7 @@ import logging
 import re
 import threading
 import time
+import unicodedata
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -37,7 +38,12 @@ from pydantic import AfterValidator, BaseModel, Field, StringConstraints, field_
 
 from axbuilder.corpus import DOC_ID
 from axbuilder.generation.answer import answer
-from axbuilder.generation.llm import LLMClient, LLMUnavailableError, get_llm
+from axbuilder.generation.llm import (
+    LLMClient,
+    LLMUnavailableError,
+    get_llm,
+    strip_url_credentials,
+)
 from axbuilder.ingest.chunking import chunk_document
 from axbuilder.ingest.loaders import DocumentTooLargeError, load_document
 from axbuilder.models import Chunk, Citation, DocMeta, ScoredChunk
@@ -78,6 +84,11 @@ INDEX_INFO = "index.json"
 _UPLOAD_PATH = re.compile(r"/workspaces/[^/]+/documents")
 # 상태를 바꾸는 요청에서 받아 주는 Sec-Fetch-Site 값 (None = 머리글 없음, 브라우저 밖 클라이언트)
 _ALLOWED_FETCH_SITES = {None, b"same-origin", b"none"}
+# Host 머리글 "호스트[:포트]"와 Origin 머리글 "스킴://호스트[:포트]". 호스트는 이름·IPv4 또는
+# 대괄호로 싼 IPv6. 전체가 맞아야 한다(계정 정보 "@", 경로, 쉼표로 이은 값은 맞지 않는다)
+_HOST_PORT = r"(\[[0-9A-Fa-f:.]+\]|[A-Za-z0-9.-]+)(?::[0-9]{1,5})?"
+_HOST_HEADER = re.compile(_HOST_PORT)
+_ORIGIN_HEADER = re.compile(r"https?://" + _HOST_PORT, re.IGNORECASE)
 
 # 오류 메시지에서 지울 로컬 경로: C:\…, \\server\…, ~/…, /home/…(두 단계 이상인 절대 경로).
 # URL(http://host/path)은 남긴다: 드라이브 문자 앞에 글자가 없어야 하고,
@@ -103,6 +114,11 @@ def _single_line(value: str) -> str:
     # "[질문]" 같은 구분 줄을 위조할 수 있다
     if _CONTROL.search(value):
         raise ValueError("must be a single line without control characters")
+    # 형식 문자(Cf): 방향 제어(U+202E 등)·폭 없는 문자·태그 문자. 인용에 보이는 제목이 실제 글자와
+    # 달라지거나, 눈에 안 보이는 글자가 프롬프트에 들어간다. 한글(완성형·자모·채움 문자)과 한자·
+    # 기호·결합 문자는 Cf가 아니다. ZWJ로 이은 이모지는 함께 막힌다
+    if any(unicodedata.category(char) == "Cf" for char in value):
+        raise ValueError("must not contain invisible format characters (Unicode category Cf)")
     return value
 
 
@@ -207,6 +223,8 @@ def _public_message(text: str) -> str:
             # 뒤에 경로 구분자·공백·끝이 와야 한다("C:\Users\hwan2"의 앞부분은 아니다)
             pattern = re.escape(variant) + r"""(?![^\\/\s'"<>()])"""
             text = re.sub(pattern, "~", text, flags=re.IGNORECASE)
+    # 경로보다 먼저: URL의 계정 정보(http://user:pass@host)를 지운다
+    text = strip_url_credentials(text)
     text = _LOCAL_PATH.sub("<path>", text)
     if len(user) >= 2:
         text = re.sub(rf"(?<!\w){re.escape(user)}(?!\w)", "<user>", text, flags=re.IGNORECASE)
@@ -619,6 +637,51 @@ class _RejectCrossSite:
         await self.app(scope, receive, send)
 
 
+class _RejectForeignHost:
+    """Host 머리글(있으면 Origin도)의 호스트가 허용 목록에 없으면 GET을 포함한 모든 요청을 403.
+
+    DNS 리바인딩 방어다. 공격자가 자기 도메인(attacker.example)의 DNS 응답을 127.0.0.1로 바꾸면,
+    그 페이지의 스크립트에게 이 서버는 "같은 출처"가 된다: Sec-Fetch-Site가 same-origin이라
+    _RejectCrossSite를 통과하고, CORS 없이 응답(내부 문서로 만든 답)도 읽는다. 이때도 브라우저가
+    보내는 Host는 공격자 도메인 그대로이므로, 서버가 자기 이름이 아닌 Host를 거절하면 막힌다.
+
+    Origin은 Sec-Fetch-Site를 보내지 않는 구형 브라우저 대비다. 호스트만 본다(포트는 보지 않는다):
+    다른 포트의 로컬 페이지는 최신 브라우저에서 _RejectCrossSite(same-site)가 막는다.
+    """
+
+    def __init__(self, app: Any, allowed_hosts: tuple[str, ...]) -> None:
+        self.app = app
+        self.allowed_hosts = frozenset(host.lower() for host in allowed_hosts)
+
+    def _allowed(self, pattern: re.Pattern[str], values: list[bytes]) -> bool:
+        if len(values) != 1:  # 없거나 여러 개: 어느 것을 믿을지 정하지 않고 거절한다
+            return False
+        match = pattern.fullmatch(values[0].decode("latin-1"))
+        return match is not None and match.group(1).lower() in self.allowed_hosts
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        if scope["type"] in ("http", "websocket"):
+            hosts = [value for name, value in scope["headers"] if name == b"host"]
+            origins = [value for name, value in scope["headers"] if name == b"origin"]
+            if not self._allowed(_HOST_HEADER, hosts) or (
+                origins and not self._allowed(_ORIGIN_HEADER, origins)
+            ):
+                if scope["type"] == "websocket":  # 지금은 websocket 경로가 없다. 생겨도 막히게
+                    await send({"type": "websocket.close", "code": 1008})
+                    return
+                # 받은 Host·Origin 값은 응답에 되돌려 주지 않는다
+                response = JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": "허용하지 않는 Host 또는 Origin입니다. 서버 주소"
+                        "(127.0.0.1·localhost)로 접속하거나 AXB_ALLOWED_HOSTS를 확인하세요"
+                    },
+                )
+                await response(scope, receive, send)
+                return
+        await self.app(scope, receive, send)
+
+
 def create_app(
     settings: Settings, llm: LLMClient | None = None, embedder: Embedder | None = None
 ) -> FastAPI:
@@ -641,7 +704,9 @@ def create_app(
         upload_bytes=MAX_UPLOAD_BYTES + UPLOAD_OVERHEAD_BYTES,
         other_bytes=MAX_JSON_BYTES,
     )
-    app.add_middleware(_RejectCrossSite)  # 마지막에 더한 것이 바깥: 본문을 읽기 전에 거른다
+    app.add_middleware(_RejectCrossSite)
+    # 마지막에 더한 것이 바깥: 본문을 읽기 전에, 다른 검사보다 먼저 거른다
+    app.add_middleware(_RejectForeignHost, allowed_hosts=settings.allowed_hosts)
 
     @app.exception_handler(LLMUnavailableError)
     async def _llm_unavailable(request: Request, exc: LLMUnavailableError) -> JSONResponse:

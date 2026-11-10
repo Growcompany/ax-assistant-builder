@@ -98,7 +98,8 @@ def llm() -> RecordingLLM:
 
 def open_client(settings: Settings, llm, embedder=None, **kwargs) -> TestClient:
     app = create_app(settings, llm=llm, embedder=embedder or HashEmbedder())
-    return TestClient(app, **kwargs)
+    # Host 허용 목록 때문에 실제 사용처럼 127.0.0.1로 부른다 (TestClient 기본값은 testserver)
+    return TestClient(app, base_url="http://127.0.0.1", **kwargs)
 
 
 @pytest.fixture
@@ -661,3 +662,258 @@ def test_internal_error_500_without_traceback(settings, llm, tmp_path):
         r = ask(client)
     assert r.status_code == 500
     assert "Traceback" not in r.text and str(tmp_path) not in r.text and "other" not in r.text
+
+
+# ---- v0.1.0 보안 점검: Host 허용 목록 (DNS 리바인딩) ----
+
+
+def test_default_client_host_is_loopback(client):
+    # 이 파일의 TestClient는 실제 사용처럼 Host: 127.0.0.1로 부른다 (기본값 testserver는 거절된다)
+    assert client.base_url.host == "127.0.0.1"
+
+
+def test_dns_rebinding_host_is_rejected(client, settings, llm):
+    # 공격자 도메인이 127.0.0.1로 풀리게 바꾸면(DNS 리바인딩) 브라우저에게는 같은 출처다:
+    # Sec-Fetch-Site가 same-origin이고 응답도 읽을 수 있다. Host 머리글만 공격자 이름으로 남는다
+    setup_indexed(client)
+    evil = {"Host": "attacker.example:8000", "Sec-Fetch-Site": "same-origin"}
+    r = client.post(
+        "/workspaces/bank/ask", json={"question": "보호 한도?", "role": "준법감시"}, headers=evil
+    )
+    assert r.status_code == 403
+    assert "attacker" not in r.text  # 받은 Host를 응답에 되돌려 주지 않는다
+    assert llm.calls == []
+    assert client.get("/health", headers={"Host": "attacker.example"}).status_code == 403
+    assert client.get("/docs", headers={"Host": "attacker.example"}).status_code == 403
+    assert client.get("/openapi.json", headers={"Host": "attacker.example"}).status_code == 403
+    before = files_under(settings.data_dir)
+    r = client.post("/workspaces", json={**WS, "id": "evil"}, headers=evil)
+    assert r.status_code == 403 and files_under(settings.data_dir) == before
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "127.0.0.1",
+        "127.0.0.1:8000",
+        "localhost",
+        "localhost:3000",
+        "LOCALHOST:8000",
+        "[::1]",
+        "[::1]:8000",
+    ],
+)
+def test_loopback_hosts_are_allowed_with_any_port(client, host):
+    assert client.get("/health", headers={"Host": host}).status_code == 200
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "testserver",
+        "attacker.example",
+        "127.0.0.1.attacker.example",
+        "localhost.attacker.example:8000",
+        "attacker.example:8000#localhost",
+        "localhost@attacker.example",
+        "localhost:8000@attacker.example",
+        "localhost, attacker.example",
+        "localhost:port",
+        "localhost:",
+        "localhost.",
+        "::1",
+        "[::1]attacker.example",
+        "127.0.0.2",
+        "0.0.0.0",
+        "",
+    ],
+)
+def test_other_hosts_are_rejected(client, host):
+    assert client.get("/health", headers={"Host": host}).status_code == 403
+
+
+def call_asgi(app, headers: list[tuple[bytes, bytes]]) -> int:
+    """TestClient는 Host를 항상 하나 붙인다. 머리글을 마음대로 주려고 ASGI로 직접 부른다."""
+    import asyncio
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": "/health",
+        "raw_path": b"/health",
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+        "client": ("127.0.0.1", 50000),
+        "server": ("127.0.0.1", 8000),
+    }
+    sent: list[dict] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        sent.append(message)
+
+    asyncio.run(app(scope, receive, send))
+    return next(m["status"] for m in sent if m["type"] == "http.response.start")
+
+
+def test_missing_or_repeated_host_header_is_rejected(client):
+    app = client.app
+    assert call_asgi(app, [(b"host", b"127.0.0.1:8000")]) == 200
+    assert call_asgi(app, []) == 403  # HTTP/1.0처럼 Host가 없는 요청
+    assert call_asgi(app, [(b"host", b"127.0.0.1"), (b"host", b"attacker.example")]) == 403
+    assert call_asgi(app, [(b"host", b"attacker.example"), (b"host", b"127.0.0.1")]) == 403
+
+
+def test_allowed_hosts_setting_replaces_the_default_list(tmp_path, llm):
+    settings = Settings(data_dir=tmp_path / "data", allowed_hosts=("axb.internal", "localhost"))
+    with open_client(settings, llm) as client:
+        assert client.get("/health", headers={"Host": "axb.internal:8000"}).status_code == 200
+        assert client.get("/health", headers={"Host": "AXB.Internal"}).status_code == 200
+        assert client.get("/health", headers={"Host": "localhost"}).status_code == 200
+        assert (
+            client.get("/health", headers={"Host": "127.0.0.1"}).status_code == 403
+        )  # 목록에 없다
+        assert client.get("/health", headers={"Host": "x.axb.internal"}).status_code == 403
+
+
+@pytest.mark.parametrize(
+    "origin",
+    [
+        "http://attacker.example",
+        "https://attacker.example:8000",
+        "http://localhost.attacker.example",
+        "http://localhost@attacker.example",
+        "http://attacker.example/http://localhost",
+        "null",  # 샌드박스 iframe, file://, 리다이렉트를 거친 요청
+        "chrome-extension://abcdefghijklmnop",
+        "",
+    ],
+)
+def test_foreign_origin_is_rejected_without_sec_fetch_site(client, settings, origin):
+    # Sec-Fetch-Site를 보내지 않는 구형 브라우저 대비: Origin이 있으면 그 호스트도 허용 목록에
+    # 있어야 한다
+    r = client.post("/workspaces", json=WS, headers={"Origin": origin})
+    assert r.status_code == 403
+    assert not (settings.data_dir / "workspaces").exists()
+    assert client.get("/health", headers={"Origin": origin}).status_code == 403
+
+
+@pytest.mark.parametrize(
+    "origin",
+    ["http://127.0.0.1:8000", "http://localhost", "https://LOCALHOST:8443", "http://[::1]:8000"],
+)
+def test_local_origin_is_allowed(client, origin):
+    assert client.post("/workspaces", json=WS, headers={"Origin": origin}).status_code == 201
+
+
+def test_local_origin_does_not_bypass_sec_fetch_site_check(client, settings):
+    # Origin 검사는 Sec-Fetch-Site 검사에 더해진 것이다. 다른 포트의 로컬 페이지는 그대로 막힌다
+    headers = {"Origin": "http://localhost:3000", "Sec-Fetch-Site": "same-site"}
+    assert client.post("/workspaces", json=WS, headers=headers).status_code == 403
+    assert not (settings.data_dir / "workspaces").exists()
+
+
+# ---- v0.1.0 보안 점검: 쪽 수·요소 수 폭탄은 업로드에서 422 ----
+
+
+def test_upload_pdf_with_too_many_pages_422(monkeypatch, client, settings):
+    monkeypatch.setattr(loaders, "PDF_MAX_PAGES", 1)
+    client.post("/workspaces", json=WS)
+    text = b"BT /F1 12 Tf 72 720 Td (Hello PDF) Tj ET\n"
+    assert upload(client, "ok.pdf", flate_pdf(text)).status_code == 201
+    monkeypatch.setattr(loaders, "PDF_MAX_PAGES", 0)
+    r = upload(client, "pages.pdf", flate_pdf(text), {**META, "doc_id": "pages"})
+    assert r.status_code == 422 and "상한" in r.json()["detail"]
+    assert "workspaces/bank/documents/pages.pdf" not in files_under(settings.data_dir)
+
+
+def test_upload_hwpx_with_too_many_elements_422(monkeypatch, client, settings):
+    client.post("/workspaces", json=WS)
+    terms = hwpx_bytes(["제1조(목적) 가", "제2조(정의) 나"])  # 요소 7개
+    monkeypatch.setattr(loaders, "HWPX_MAX_ELEMENTS", 7)
+    assert upload(client, "terms.hwpx", terms).status_code == 201
+    monkeypatch.setattr(loaders, "HWPX_MAX_ELEMENTS", 6)
+    r = upload(client, "terms.hwpx", terms, {**META, "doc_id": "bomb"})
+    assert r.status_code == 422 and "상한" in r.json()["detail"]
+    assert "workspaces/bank/documents/bomb.hwpx" not in files_under(settings.data_dir)
+
+
+# ---- v0.1.0 보안 점검: 503 메시지의 URL 계정 정보, 보이지 않는 문자 ----
+
+
+def test_llm_error_detail_hides_url_credentials(settings):
+    # AXB_OLLAMA_URL에 계정 정보(http://user:pass@host)를 넣어 쓰는 경우. 호스트는 남긴다
+    down = DownLLM(
+        "Ollama 서버(http://admin:hunter2@gpu-box:11434)에 연결할 수 없습니다. "
+        "프록시 https://p%40x:s3cret@proxy.example:3128/path 를 확인하세요"
+    )
+    with open_client(settings, down) as client:
+        setup_indexed(client)
+        r = ask(client)
+    detail = r.json()["detail"]
+    assert r.status_code == 503
+    for secret in ("admin", "hunter2", "s3cret", "p%40x", "@"):
+        assert secret not in detail
+    assert "http://gpu-box:11434" in detail and "https://proxy.example:3128/path" in detail
+
+
+def test_public_message_keeps_urls_and_text_without_credentials():
+    text = "메일 a@b.example 로 문의, http://localhost:11434/api/chat?x=a@b 참고"
+    assert app_module._public_message(text) == text
+
+
+@pytest.mark.parametrize(
+    "char",
+    [
+        "‮",  # RIGHT-TO-LEFT OVERRIDE: 뒤 글자를 거꾸로 보이게 한다
+        "‭",
+        "⁦",  # 방향 격리
+        "⁩",
+        "‎",  # LEFT-TO-RIGHT MARK
+        "‏",
+        "؜",
+        "​",  # 폭 없는 공백
+        "‌",
+        "‍",
+        "⁠",
+        "﻿",
+        "­",  # 소프트 하이픈
+        "\U000e0041",  # 태그 문자 (보이지 않는 ASCII 복사본)
+    ],
+)
+@pytest.mark.parametrize("field", ["title", "source"])
+def test_upload_rejects_invisible_format_characters(client, settings, field, char):
+    # 제목·출처에 방향 제어·폭 없는 문자가 있으면 인용에 보이는 글과 실제 글이 달라진다
+    client.post("/workspaces", json=WS)
+    r = upload(client, "law.txt", LAW_TXT, {**META, field: f"예금자{char}보호법"})
+    assert r.status_code == 422
+    assert files_under(settings.data_dir) == {"workspaces/bank/workspace.yaml"}
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        "예금자보호법 시행령 [별표 1] (제3조 관련) ①②③ ㈜AXB",
+        "예금",  # 자모가 풀어진(NFD) "예금": macOS 파일 이름에서 온 제목
+        "ㄱㅏ ㅤ ﾠ",  # 호환 자모, 한글 채움 문자
+        "預金者保護法 ＡＸＢ銀行 ‘약관’ — 2026·11 ～ 🙂",
+        "é a️",  # 결합 문자, 변형 선택자
+    ],
+)
+def test_upload_accepts_korean_and_ordinary_unicode_titles(client, title):
+    client.post("/workspaces", json=WS)
+    assert upload(client, "law.txt", LAW_TXT, {**META, "title": title}).status_code == 201
+
+
+def test_create_workspace_rejects_invisible_format_characters(client, settings):
+    # 워크스페이스 이름·역할 이름도 같은 한 줄 검증을 쓴다(이름은 시스템 프롬프트에 들어간다)
+    assert client.post("/workspaces", json={**WS, "name": "AXB‮은행"}).status_code == 422
+    roles = {"상담​원": ["public"]}
+    assert client.post("/workspaces", json={**WS, "roles": roles}).status_code == 422
+    assert not (settings.data_dir / "workspaces" / "bank").exists()
