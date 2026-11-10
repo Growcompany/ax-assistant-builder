@@ -28,6 +28,10 @@ data/processed/*
 !data/processed/.gitkeep
 # AXB_DATA_DIR 기본값 "data"는 실행 위치 기준이라, 하위 폴더에서 실행해도 원문이 올라가지 않게
 **/data/workspaces/
+# AXB_DATA_DIR를 저장소 안의 다른 이름(예: store/)으로 두어도 원문·업로드 문서·색인은 올라가지 않게
+**/workspaces/*/raw/
+**/workspaces/*/documents/
+**/workspaces/*/index/
 *.hwpx
 vectorstore/
 chroma_db/
