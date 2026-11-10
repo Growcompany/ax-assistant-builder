@@ -8,12 +8,16 @@ create_app(settings, llm=None, embedder=None)이 앱을 만든다. 테스트는 
   documents/{doc_id}{확장자}    올린 원본. 이름은 클라이언트가 보낸 파일 이름이 아니라 doc_id
   documents/{doc_id}.json      DocMeta + 확장자·크기·sha256
   index/qdrant/                dense 색인 (Qdrant 로컬 모드 파일)
-  index/index.json             색인 정보(임베더, 차원, 청크 수). 색인을 다 만든 뒤에 쓴다
+  index/index.json             색인 정보(임베더, 차원, 청크 수, 색인에 든 doc_id 목록).
+                               색인을 다 만든 뒤에 쓴다
 
 색인은 워크스페이스별로 메모리에 캐시한다. 서버를 다시 켜면 그 워크스페이스에 처음 질문할 때
 index/의 Qdrant 색인을 열고, 그 안의 청크로 BM25를 다시 만든다(임베딩은 다시 계산하지 않는다).
 임베더가 바뀌었거나 색인이 덜 만들어졌으면 409로 다시 색인하라고 알린다. 문서를 올린 뒤에는
 POST /index를 다시 불러야 질문에 반영된다.
+
+화면(static/)도 이 앱이 내준다: GET /은 static/index.html, GET /static/…은 그 폴더의 파일.
+화면이 쓰는 조회 API(GET /workspaces, GET /workspaces/{id})는 색인을 열지 않고 파일만 읽는다.
 """
 
 import functools
@@ -21,6 +25,7 @@ import getpass
 import hashlib
 import json
 import logging
+import mimetypes
 import re
 import threading
 import time
@@ -33,10 +38,12 @@ from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, BinaryIO, Literal
 
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import AfterValidator, BaseModel, Field, StringConstraints, field_validator
+from starlette.datastructures import MutableHeaders
 
-from axbuilder.corpus import DOC_ID
+from axbuilder.corpus import DOC_ID, load_sources, source_file
 from axbuilder.generation.answer import answer
 from axbuilder.generation.llm import (
     LLMClient,
@@ -52,6 +59,7 @@ from axbuilder.retrieval.dense import DenseIndex, Embedder
 from axbuilder.retrieval.hybrid import HybridRetriever
 from axbuilder.settings import Settings
 from axbuilder.workspace import (
+    CONFIG_NAME,
     WINDOWS_RESERVED,
     Workspace,
     WorkspaceExistsError,
@@ -81,6 +89,31 @@ MAX_CHUNKS_PER_DOCUMENT = 10_000
 MAX_CONCURRENT_PARSES = 2
 COLLECTION = "chunks"
 INDEX_INFO = "index.json"
+STATIC_DIR = Path(__file__).parent / "static"  # 화면 파일 (패키지 데이터)
+# 화면 응답에 붙인다. 인라인 스크립트·스타일과 외부 출처를 막아, 문서 제목이나 답변의 글자가
+# 혹시 마크업으로 들어가도 실행되지 않게 한다
+CONTENT_SECURITY_POLICY = (
+    "default-src 'self'; img-src 'self' data:; object-src 'none'; "
+    "base-uri 'none'; frame-ancestors 'none'"
+)
+# 예시 워크스페이스(POST /demo-workspace): 서버를 띄운 폴더 기준의 출처 목록에서 저장소에 있는
+# 가상 문서(path 항목)만 등록한다
+DEMO_SOURCES = Path("corpus") / "bank" / "sources.yaml"
+DEMO_WORKSPACE = Workspace(
+    id="demo",
+    name="AXB은행(가상)",
+    industry="은행",
+    roles={"상담원": ["public"], "준법감시": ["public", "internal"]},
+)
+
+# Windows의 mimetypes는 레지스트리를 읽어 .js를 text/plain으로 알려 주기도 한다. nosniff와 함께면
+# 브라우저가 모듈 스크립트·스타일을 쓰지 않으므로 화면에 쓰는 형식은 고정한다
+for _media_type, _suffix in (
+    ("text/javascript", ".js"),
+    ("text/css", ".css"),
+    ("image/svg+xml", ".svg"),
+):
+    mimetypes.add_type(_media_type, _suffix)
 _UPLOAD_PATH = re.compile(r"/workspaces/[^/]+/documents")
 # 상태를 바꾸는 요청에서 받아 주는 Sec-Fetch-Site 값 (None = 머리글 없음, 브라우저 밖 클라이언트)
 _ALLOWED_FETCH_SITES = {None, b"same-origin", b"none"}
@@ -183,11 +216,45 @@ class AskRequest(BaseModel):
     role: str
 
 
+class Passage(BaseModel):
+    """인용한 청크의 원문."""
+
+    chunk_id: str
+    text: str
+
+
 class AskResponse(BaseModel):
     answer: str  # 본문의 [i]는 citations[i-1]
     citations: list[Citation]
     refused: bool
     latency_ms: float  # 검색 + LLM 생성 시간
+    passages: list[Passage]  # passages[i]는 citations[i]의 원문 (같은 순서, 같은 길이)
+
+
+class IndexStatus(BaseModel):
+    # none = 색인 없음, ready = 지금 문서가 모두 색인에 있음, stale = 다시 색인해야 함
+    state: Literal["none", "ready", "stale"]
+    chunks: int | None  # 지금 색인의 청크 수. 색인이 없거나 알 수 없으면 None
+
+
+class WorkspaceSummary(Workspace):
+    documents: int
+    index: IndexStatus
+
+
+class DocumentInfo(BaseModel):
+    doc_id: str
+    title: str
+    source: str
+    doc_type: str
+    access_level: Literal["public", "internal"]
+    extension: str  # ".pdf"처럼 점을 포함한다
+    size_bytes: int
+    indexed: bool  # 지금 색인에 들어 있는가
+
+
+class WorkspaceDetail(WorkspaceSummary):
+    documents_list: list[DocumentInfo]  # doc_id 오름차순
 
 
 @dataclass
@@ -447,6 +514,133 @@ class _Service:
         chunks.sort(key=_chunk_order)
         return chunks, sorted(doc_ids)
 
+    # ---- 조회 (화면용) ----
+
+    def _document_records(self, workspace_id: str) -> list[Path]:
+        documents = self._documents_dir(workspace_id)
+        return list(documents.glob("*.json")) if documents.is_dir() else []
+
+    def _index_status(self, workspace_id: str, doc_ids: set[str]) -> tuple[IndexStatus, set[str]]:
+        """(색인 상태, 색인에 든 doc_id). index.json만 읽는다(색인·임베딩 모델을 열지 않는다).
+
+        잠금 없이 읽는다: index.json은 통째로 바꿔 끼우므로 반쯤 쓴 내용을 볼 일이 없다. 재색인
+        도중에는 잠깐 "none"으로 보일 수 있다.
+        """
+        try:
+            raw = (self._index_dir(workspace_id) / INDEX_INFO).read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return IndexStatus(state="none", chunks=None), set()
+        try:
+            info = json.loads(raw)
+        except ValueError:
+            info = None
+        if not isinstance(info, dict):
+            info = {}
+        chunks = info.get("chunks")
+        if not isinstance(chunks, int) or isinstance(chunks, bool) or chunks < 0:
+            chunks = None
+        listed = info.get("documents")
+        # 색인에 무엇이 들었는지 모르면(예전 형식·손상) ready라고 하지 않는다: 올렸는데 답에 안
+        # 나오는 것보다 다시 색인하라고 하는 쪽이 안전하다
+        known = isinstance(listed, list) and all(isinstance(item, str) for item in listed)
+        indexed = set(listed) if known else set()
+        # 임베더가 다른 색인은 질문하면 409(다시 색인)다. 화면에서도 준비됨으로 보이지 않게 한다
+        ready = known and indexed == doc_ids and info.get("embedder") == self._embedder_name
+        return IndexStatus(state="ready" if ready else "stale", chunks=chunks), indexed
+
+    def summary(self, ws: Workspace) -> WorkspaceSummary:
+        doc_ids = {record.stem for record in self._document_records(ws.id)}
+        status, _ = self._index_status(ws.id, doc_ids)
+        return WorkspaceSummary(**ws.model_dump(), documents=len(doc_ids), index=status)
+
+    def detail(self, ws: Workspace) -> WorkspaceDetail:
+        records = []
+        for record_path in self._document_records(ws.id):
+            record = json.loads(record_path.read_text(encoding="utf-8"))
+            meta = DocMeta.model_validate(record["meta"])
+            if meta.doc_id != record_path.stem:
+                raise ValueError(f"inconsistent document record {record_path.name}")
+            records.append((meta, record))
+        records.sort(key=lambda item: item[0].doc_id)
+        status, indexed = self._index_status(ws.id, {meta.doc_id for meta, _ in records})
+        # 저장 정보(sha256, 올린 시각)는 화면에 필요 없어 내보내지 않는다
+        documents = [
+            DocumentInfo(
+                doc_id=meta.doc_id,
+                title=meta.title,
+                source=meta.source,
+                doc_type=meta.doc_type,
+                access_level=meta.access_level,
+                extension=record["suffix"],
+                size_bytes=record["bytes"],
+                indexed=meta.doc_id in indexed,
+            )
+            for meta, record in records
+        ]
+        return WorkspaceDetail(
+            **ws.model_dump(), documents=len(documents), index=status, documents_list=documents
+        )
+
+    # ---- 예시 워크스페이스 ----
+
+    def create_demo(self) -> int:
+        """저장소의 가상 문서로 워크스페이스 "demo"를 만든다 → 등록한 문서 수. 색인은 하지 않는다.
+
+        문서는 업로드와 같은 add_document()로 넣는다(형식·서명·파싱 검사, 같은 저장 모양).
+        도중에 실패하면 만든 것을 모두 지운다: 반쯤 만든 워크스페이스가 남으면 다시 눌러도 409라
+        화면에서 고칠 길이 없다.
+        """
+        root = Path.cwd()
+        not_found = HTTPException(
+            404,
+            "예시 문서(corpus/bank)를 찾을 수 없습니다. 저장소 루트에서 서버를 실행하세요",
+        )
+        if not (root / DEMO_SOURCES).is_file():
+            raise not_found
+        sources = [s for s in load_sources(root / DEMO_SOURCES) if s.path is not None]
+        # source_file은 path가 root 밖으로 풀리면 거절한다. path 항목은 raw_dir를 쓰지 않는다
+        files = [(source, source_file(source, root, root)) for source in sources]
+        if not files or not all(path.is_file() for _, path in files):
+            raise not_found
+        try:
+            ws = self.store.create(DEMO_WORKSPACE)
+        except WorkspaceExistsError:
+            raise HTTPException(
+                409, f"워크스페이스 '{DEMO_WORKSPACE.id}'가 이미 있습니다"
+            ) from None
+        added: list[str] = []
+        doc_id = ""
+        try:
+            for source, path in files:
+                doc_id = source.doc_id
+                meta = UploadMeta(**source.doc_meta().model_dump())
+                with path.open("rb") as stream:
+                    self.add_document(ws, meta, UploadFile(stream, filename=path.name))
+                added.append(f"{doc_id}{path.suffix.lower()}")
+                added.append(f"{doc_id}.json")
+        except BaseException as e:
+            self._discard_demo(added)
+            if isinstance(e, HTTPException):
+                # 서버에 있는 파일의 문제라 요청 오류(4xx)가 아니다. 이유(빈 파일 등)는 알린다
+                raise HTTPException(
+                    500, f"예시 문서 '{doc_id}'를 등록하지 못했습니다: {e.detail}"
+                ) from None
+            raise
+        return len(files)
+
+    def _discard_demo(self, added: list[str]) -> None:
+        directory = self.store.path(DEMO_WORKSPACE.id)
+        # 설정 파일부터: 그 뒤로는 API에서 이 워크스페이스가 없는 것으로 보인다
+        (directory / CONFIG_NAME).unlink(missing_ok=True)
+        documents = self._documents_dir(DEMO_WORKSPACE.id)
+        for name in added:  # 여기서 넣은 파일만 지운다
+            (documents / name).unlink(missing_ok=True)
+        for folder in (documents, directory):
+            try:
+                folder.rmdir()
+            except OSError:  # 없거나, 다른 파일이 있으면 그대로 둔다
+                pass
+
     # ---- 색인 ----
 
     def build_index(self, ws: Workspace) -> int:
@@ -551,11 +745,18 @@ class _Service:
         result = answer(
             request.question, _WorkspaceRetriever(self, ws.id), self.llm, ws, request.role
         )
+        # 원문은 이 질문에서 이 역할로 검색된 청크(result.retrieved)에서만 찾는다. 색인 전체에서
+        # chunk_id로 찾지 않는다: 권한 밖 문서의 본문이 나갈 길을 만들지 않는다
+        texts = {scored.chunk.chunk_id: scored.chunk.text for scored in result.retrieved}
         return AskResponse(
             answer=result.text,
             citations=result.citations,
             refused=result.refused,
             latency_ms=(time.perf_counter() - started) * 1000,
+            passages=[
+                Passage(chunk_id=citation.chunk_id, text=texts[citation.chunk_id])
+                for citation in result.citations
+            ],
         )
 
 
@@ -612,6 +813,34 @@ class _BodySizeLimit:
             return message
 
         await self.app(scope, limited_receive, send)
+
+
+class _UISecurityHeaders:
+    """화면 응답(GET /, /static/…)에 CSP와 nosniff를 붙인다. 404 같은 오류 응답에도 붙는다.
+
+    /docs(Swagger)는 CDN의 스크립트를 쓰므로 CSP를 붙이지 않는다. API의 JSON 응답도 그대로 둔다.
+    Cache-Control: no-cache는 "쓰기 전에 서버에 확인"이다(ETag로 304). 서버를 새 판으로 바꿨는데
+    브라우저가 예전 화면 스크립트를 계속 쓰는 일을 막는다.
+    """
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        path = scope["path"] if scope["type"] == "http" else ""
+        if path != "/" and path != "/static" and not path.startswith("/static/"):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_headers(message: Any) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
+                headers["X-Content-Type-Options"] = "nosniff"
+                headers["Cache-Control"] = "no-cache"
+            await send(message)
+
+        await self.app(scope, receive, send_with_headers)
 
 
 class _RejectCrossSite:
@@ -703,6 +932,7 @@ def create_app(
 
     app = FastAPI(title="AX Assistant Builder", version="0.1.0", lifespan=lifespan)
     app.state.service = service
+    app.add_middleware(_UISecurityHeaders)
     app.add_middleware(
         _BodySizeLimit,
         upload_bytes=MAX_UPLOAD_BYTES + UPLOAD_OVERHEAD_BYTES,
@@ -741,6 +971,25 @@ def create_app(
     def health() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.get("/", include_in_schema=False)
+    def ui() -> FileResponse:
+        index = STATIC_DIR / "index.html"
+        if not index.is_file():
+            raise HTTPException(404, "화면 파일(static/index.html)이 없습니다")
+        return FileResponse(index, media_type="text/html")
+
+    @app.get("/workspaces")
+    def list_workspaces() -> list[WorkspaceSummary]:
+        return [service.summary(ws) for ws in service.store.list()]  # id 오름차순
+
+    @app.get("/workspaces/{workspace_id}")
+    def get_workspace(workspace_id: str) -> WorkspaceDetail:
+        return service.detail(service.workspace(workspace_id))
+
+    @app.post("/demo-workspace", status_code=201)
+    def create_demo_workspace() -> dict[str, str | int]:
+        return {"id": DEMO_WORKSPACE.id, "documents": service.create_demo()}
+
     @app.post("/workspaces", status_code=201)
     def create_workspace(ws: NewWorkspace) -> Workspace:
         try:
@@ -766,4 +1015,7 @@ def create_app(
         ws = service.workspace(workspace_id)
         return service.ask(ws, request)
 
+    # 경로 조작("..", 절대 경로)은 StaticFiles가 폴더 밖이면 404로 막는다. 폴더가 아직 없어도
+    # 앱은 뜬다(그때는 404)
+    app.mount("/static", StaticFiles(directory=STATIC_DIR, check_dir=False), name="static")
     return app

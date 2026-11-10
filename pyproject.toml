@@ -36,6 +36,10 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# 화면 파일(HTML·CSS·JS)을 설치본에도 넣는다
+[tool.setuptools.package-data]
+"axbuilder.api" = ["static/**"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"

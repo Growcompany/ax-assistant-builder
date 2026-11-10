@@ -231,7 +231,7 @@ def test_ask_response_shape(client):
     setup_indexed(client)
     r = ask(client)
     body = r.json()
-    assert set(body) == {"answer", "citations", "refused", "latency_ms"}
+    assert set(body) == {"answer", "citations", "refused", "latency_ms", "passages"}
     assert body["refused"] is False and body["latency_ms"] >= 0
     assert body["answer"] == "보호한도는 대통령령으로 정합니다 [1]."
     assert set(body["citations"][0]) == {"chunk_id", "doc_id", "title", "page", "article"}
