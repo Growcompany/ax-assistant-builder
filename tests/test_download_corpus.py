@@ -4,6 +4,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import time
 import zipfile
 from pathlib import Path
 
@@ -206,11 +207,23 @@ def test_load_sources_needs_top_level_list(tmp_path):
 
 
 def hwpx_bytes() -> bytes:
+    """부를 때마다 같은 바이트. 항목 시각을 고정한다(이름만 주면 writestr가 지금 시각을 찍는다)."""
     out = io.BytesIO()
     with zipfile.ZipFile(out, "w") as zf:
-        zf.writestr("mimetype", "application/hwp+zip")
-        zf.writestr("Contents/section0.xml", "<sec/>")
+        for name, content in [
+            ("mimetype", "application/hwp+zip"),
+            ("Contents/section0.xml", "<sec/>"),
+        ]:
+            zf.writestr(zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0)), content)
     return out.getvalue()
+
+
+def test_hwpx_bytes_helper_does_not_depend_on_the_clock(monkeypatch):
+    # 드물게 실패하던 원인: writestr는 ZIP 항목에 지금 시각(2초 단위)을 찍는다. 응답을 만들 때와
+    # 저장된 파일과 비교할 때 사이에 2초 경계를 넘으면 바이트가 달라졌다
+    clock = iter(range(1_800_000_000, 1_900_000_000, 2))
+    monkeypatch.setattr(time, "time", lambda: next(clock))
+    assert hwpx_bytes() == hwpx_bytes()
 
 
 def mock_client(routes: dict[str, httpx.Response]) -> httpx.Client:

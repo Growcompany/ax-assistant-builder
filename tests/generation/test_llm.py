@@ -16,6 +16,7 @@ from axbuilder.generation.llm import (
     LLMUnavailableError,
     OllamaClient,
     get_llm,
+    strip_url_credentials,
 )
 from axbuilder.settings import Settings
 
@@ -392,3 +393,130 @@ def test_claude_default_client_sets_timeout_and_retries(monkeypatch, no_anthropi
     assert (CLAUDE_TIMEOUT.read, CLAUDE_TIMEOUT.connect) == (120.0, 5.0)
     # 시간 초과도 재시도되므로 최악의 대기 = 시도 횟수 × 한 번의 시간 제한 (백오프 제외)
     assert (CLAUDE_MAX_RETRIES + 1) * CLAUDE_TIMEOUT.read <= 300
+
+
+# ---- v0.1.0 보안 점검: 프록시 환경변수, URL의 계정 정보 ----
+
+PROXY_ENV = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"]
+
+
+def test_ollama_client_ignores_proxy_environment(monkeypatch):
+    # 프록시 환경변수를 따르면 로컬 Ollama로 갈 프롬프트(내부 문서 발췌)가 프록시로 나간다
+    for name in PROXY_ENV:
+        monkeypatch.setenv(name, "http://proxy.invalid:3128")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    # 환경변수를 따르는 httpx.Client는 이 URL을 프록시 transport로 보낸다 (테스트의 전제 확인)
+    with httpx.Client(base_url="http://gpu-box:11434") as plain:
+        url = httpx.URL("http://gpu-box:11434/api/chat")
+        assert plain._transport_for_url(url) is not plain._transport
+
+    for base_url in ("http://gpu-box:11434", "http://localhost:11434", "https://gpu-box"):
+        http = OllamaClient("m", base_url)._http
+        assert http.trust_env is False
+        assert http._transport_for_url(httpx.URL(base_url + "/api/chat")) is http._transport
+
+
+def failing_transport(error: Exception) -> httpx.MockTransport:
+    def handler(request):
+        raise error
+
+    return httpx.MockTransport(handler)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectError("connection refused"),
+        httpx.ReadError("reset while talking to http://admin:hunter2@gpu-box:11434/api/chat"),
+    ],
+)
+def test_ollama_error_message_hides_url_credentials(error):
+    llm = OllamaClient(
+        "m", "http://admin:hunter2@gpu-box:11434", transport=failing_transport(error)
+    )
+    with pytest.raises(LLMUnavailableError) as excinfo:
+        llm.generate("s", "u")
+    message = str(excinfo.value)
+    assert "hunter2" not in message and "admin" not in message and "@" not in message
+    assert "http://gpu-box:11434" in message  # 어느 서버인지는 알려 준다
+
+
+def test_ollama_still_sends_url_credentials_to_the_server():
+    # 메시지에서만 지운다. 요청은 계정 정보(Basic 인증)를 그대로 쓴다
+    seen = {}
+
+    def handler(request):
+        seen["authorization"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"message": {"content": "답"}})
+
+    llm = OllamaClient(
+        "m", "http://admin:hunter2@gpu-box:11434", transport=httpx.MockTransport(handler)
+    )
+    assert llm.generate("s", "u").text == "답"
+    assert seen["authorization"] == "Basic YWRtaW46aHVudGVyMg=="
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("http://user:pass@host:11434/x", "http://host:11434/x"),
+        ("see https://user@host and http://a:b@c", "see https://host and http://c"),
+        ("http://user:p@ss@host/", "http://host/"),
+        ("http://host/path?mail=a@b", "http://host/path?mail=a@b"),
+        ("a@b.example, http://host", "a@b.example, http://host"),
+    ],
+)
+def test_strip_url_credentials(text, expected):
+    assert strip_url_credentials(text) == expected
+
+
+# ---- PR #19 보안 리뷰: 스킴 없는 URL, httpx 요청 로그 ----
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "//admin:hunter2@127.0.0.1:11434",
+        "admin:hunter2@127.0.0.1:11434",
+        "127.0.0.1:11434",
+        "ftp://admin:hunter2@127.0.0.1",
+        "http://",
+        "",
+    ],
+)
+def test_ollama_url_without_http_scheme_fails_at_construction_without_credentials(url):
+    # 스킴을 빠뜨린 값은 "://"가 없어 계정 정보를 지우는 정규식에 걸리지 않았고, 요청 때마다
+    # 503 본문에 비밀번호가 그대로 나왔다. 쓸 수 없는 설정이므로 만들 때 바로 실패시킨다
+    with pytest.raises(ValueError, match="AXB_OLLAMA_URL") as excinfo:
+        OllamaClient("m", url)
+    message = str(excinfo.value)
+    assert "hunter2" not in message and "admin" not in message and "@" not in message
+
+
+def test_ollama_url_credentials_move_to_auth_and_stay_out_of_request_logs(caplog):
+    # httpx는 INFO 로그에 요청 URL을 그대로 찍는다. 계정 정보를 URL에 두면 비밀번호가 로그에 남는다
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["authorization"] = request.headers.get("authorization")
+        return httpx.Response(200, json={"message": {"content": "답"}})
+
+    llm = OllamaClient(
+        "m", "http://admin:p%40ss%2Fw0rd@gpu-box:11434", transport=httpx.MockTransport(handler)
+    )
+    assert llm.base_url == "http://gpu-box:11434"
+    with caplog.at_level(logging.DEBUG):
+        assert llm.generate("s", "u").text == "답"
+    assert seen["url"] == "http://gpu-box:11434/api/chat"
+    # Basic 인증은 그대로 간다(비밀번호는 퍼센트 인코딩을 푼 값 "p@ss/w0rd")
+    assert seen["authorization"] == "Basic YWRtaW46cEBzcy93MHJk"
+    assert "HTTP Request: POST http://gpu-box:11434/api/chat" in caplog.text
+    for secret in ("p%40ss", "p@ss", "w0rd", "admin", "YWRtaW4"):
+        assert secret not in caplog.text
+
+
+def test_ollama_url_without_credentials_is_kept_as_given():
+    llm = OllamaClient("m", "http://localhost:11434")
+    assert llm.base_url == "http://localhost:11434" and llm._http.auth is None

@@ -1,3 +1,4 @@
+import hashlib
 import math
 import os
 import subprocess
@@ -6,9 +7,11 @@ import time
 import types
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 import axbuilder
+import axbuilder.retrieval.dense as dense_module
 from axbuilder.models import Chunk
 from axbuilder.retrieval.dense import (
     MAX_BATCH_CHARS,
@@ -431,3 +434,221 @@ def test_real_model_timing(capsys):
             f"\n[timing] cuda={torch.cuda.is_available()} dim={emb.dim} "
             f"load={load_s:.1f}s embed100={embed_s:.2f}s"
         )
+
+
+# ---- 전체 코드 감사: 동점 순서, 재색인 실패 ----
+
+
+def tied_chunks(count: int) -> list[Chunk]:
+    """본문이 같은 청크(벡터·점수가 같다). 실제 코퍼스에도 "제2조 생략" 같은 조항이 54개 있다."""
+    return [chunk(0, "제2조 생략", doc_id=f"law-{i:02d}") for i in range(count)]
+
+
+def search_ids(folder: Path, query: str, k: int, **kwargs) -> list[str]:
+    idx = DenseIndex(HashEmbedder(), folder, "bank")
+    try:
+        return [r.chunk.chunk_id for r in idx.search(query, k=k, **kwargs)]
+    finally:
+        idx.close()
+
+
+@pytest.mark.parametrize("k", [1, 5, 12, 13, 30])
+def test_tied_scores_are_ordered_by_chunk_id_in_every_session(tmp_path, k):
+    # Qdrant 로컬 모드는 동점을 저장 순서대로 돌려주는데, 그 순서가 색인한 세션과 다시 연 세션에서
+    # 다르다. 재시작 전후로 같은 질문의 상위 결과와 인용이 바뀌었다. k가 동점 묶음 중간을 자를 때
+    # (k=1, 5)도 어느 것이 남는지 정해져 있어야 한다
+    tied = tied_chunks(12)
+    others = [chunk(i, f"전자금융거래 접근매체 관리 {i}") for i in range(5)]
+    mixed = [tied[7], others[0], tied[2], *tied[8:], others[1], *tied[:2], *others[2:], *tied[3:7]]
+    folder = tmp_path / "qdrant"
+    idx = DenseIndex(HashEmbedder(), folder, "bank")
+    idx.build(mixed)
+    built = idx.search("제2조 생략", k=k)
+    idx.close()
+
+    expected = [c.chunk_id for c in tied][:k]
+    assert [r.chunk.chunk_id for r in built][:12] == expected
+    assert len(built) == min(k, 17)
+    assert [r.score for r in built] == sorted((r.score for r in built), reverse=True)
+    for _ in range(2):  # 다시 연 세션
+        assert search_ids(folder, "제2조 생략", k)[:12] == expected
+
+
+def test_tie_at_the_cut_is_resolved_among_all_tied_chunks(tmp_path):
+    # 동점 묶음이 k보다 훨씬 커도(받아 온 수를 넘어도) 묶음 전체에서 chunk_id가 앞선 것이 남는다
+    tied = tied_chunks(200)
+    folder = tmp_path / "qdrant"
+    idx = DenseIndex(HashEmbedder(), folder, "bank")
+    idx.build(list(reversed(tied)) + [c1])
+    first = [r.chunk.chunk_id for r in idx.search("제2조 생략", k=3)]
+    idx.close()
+    assert first == [c.chunk_id for c in tied[:3]]
+    assert search_ids(folder, "제2조 생략", 3) == first
+
+
+def test_tie_order_respects_access_filter(tmp_path):
+    tied = [
+        c.model_copy(update={"access_level": "internal" if i % 2 else "public"})
+        for i, c in enumerate(tied_chunks(10))
+    ]
+    folder = tmp_path / "qdrant"
+    idx = DenseIndex(HashEmbedder(), folder, "bank")
+    idx.build(list(reversed(tied)))
+    idx.close()
+    internal = [c.chunk_id for c in tied if c.access_level == "internal"]
+    assert search_ids(folder, "제2조 생략", 3, access_levels=["internal"]) == internal[:3]
+
+
+class FailingEmbedder(HashEmbedder):
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        raise RuntimeError("CUDA out of memory")
+
+
+def test_before_replace_runs_after_embedding_and_before_the_store_changes(tmp_path):
+    # API는 이 시점에 index.json을 지운다: 임베딩이 실패하면 옛 색인이 그대로 쓸 수 있는 상태로
+    # 남고, 저장소를 바꾸기 시작한 뒤에 실패하면 "색인 없음"으로 보인다
+    spy = SpyEmbedder(HashEmbedder())
+    idx = DenseIndex(spy, ":memory:", "t")
+    idx.build([c1, c2])
+    seen = []
+    idx.build([c3], before_replace=lambda: seen.append((len(spy.embed_calls), idx.chunks())))
+    assert len(seen) == 1
+    embed_calls, stored = seen[0]
+    assert embed_calls == 2  # 새 청크의 임베딩이 끝난 뒤
+    assert sorted(stored, key=lambda c: c.chunk_id) == [c1, c2]  # 옛 점은 아직 그대로
+    assert idx.chunks() == [c3]
+
+
+def test_failed_embedding_keeps_the_old_index_and_skips_before_replace(tmp_path):
+    folder = tmp_path / "qdrant"
+    idx = DenseIndex(HashEmbedder(), folder, "bank")
+    idx.build([c1, c2])
+    idx.close()
+    failing = DenseIndex(FailingEmbedder(), folder, "bank")
+    called = []
+    try:
+        with pytest.raises(RuntimeError, match="out of memory"):
+            failing.build([c3], before_replace=lambda: called.append(1))
+        assert called == []
+        assert sorted(failing.chunks(), key=lambda c: c.chunk_id) == [c1, c2]
+    finally:
+        failing.close()
+
+
+# ---- PR #19 리뷰: 실제 임베딩처럼 촘촘한 벡터에서는 같은 벡터의 점수도 마지막 자리가 갈린다 ----
+
+
+class DenseRandomEmbedder:
+    """실제 모델과 같은 모양의 벡터: 촘촘한 float32 난수를 L2 정규화한다(dim 1024).
+
+    본문이 같으면 비트까지 같은 벡터를 낸다. HashEmbedder의 벡터는 성분이 몇 개뿐이라 같은 벡터의
+    점수가 갈리지 않아서, 동점 처리가 실제로 동작하는지 보여 주지 못했다.
+    """
+
+    dim = 1024
+
+    def _vector(self, text: str) -> np.ndarray:
+        seed = int.from_bytes(hashlib.blake2b(text.encode("utf-8"), digest_size=8).digest(), "big")
+        vector = np.random.default_rng(seed).standard_normal(self.dim).astype(np.float32)
+        return vector / np.linalg.norm(vector)
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [self._vector(text).tolist() for text in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        # 질문 벡터가 "제2조 생략" 묶음에 가깝게: 묶음이 상위에 오고 k가 그 가운데를 자른다
+        vector = 0.7 * self._vector("제2조 생략") + 0.3 * self._vector(text)
+        return (vector / np.linalg.norm(vector)).tolist()
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_identical_dense_vectors_rank_the_same_in_every_session(tmp_path, seed):
+    # 청크 945개 가운데 본문이 같은 것 54개(실제 은행 코퍼스와 같은 수). Qdrant 로컬 모드는 비트까지
+    # 같은 벡터에도 저장 위치에 따라 마지막 자리가 다른 점수를 준다(…5487 / …5482). 점수를 ==로
+    # 비교하면 동점으로 묶이지 않아, 색인한 세션과 다시 연 세션의 순서와 구성원이 달랐다
+    embedder = DenseRandomEmbedder()
+    assert embedder.embed(["제2조 생략"]) == embedder.embed(["제2조 생략"])
+    tied = tied_chunks(54)
+    others = [chunk(i, f"전자금융거래 접근매체 관리 {i}", doc_id="other") for i in range(891)]
+    mixed = tied + others
+    order = np.random.default_rng(seed).permutation(len(mixed))
+    folder = tmp_path / "qdrant"
+    sessions: dict[int, list[list[str]]] = {5: [], 30: [], 60: []}
+    for session in range(3):
+        idx = DenseIndex(embedder, folder, "bank")
+        try:
+            if session == 0:
+                idx.build([mixed[i] for i in order])
+            for k, results in sessions.items():
+                results.append([r.chunk.chunk_id for r in idx.search("질문", k=k)])
+        finally:
+            idx.close()
+    tied_ids = [c.chunk_id for c in tied]
+    for k, results in sessions.items():
+        assert results[0][:54] == tied_ids[:k], f"k={k}: indexing session"
+        assert results[1] == results[0] and results[2] == results[0], f"k={k}: reopened sessions"
+        assert len(results[0]) == k
+
+
+def test_tie_groups_are_anchored_to_their_highest_score():
+    # 묶음의 가장 높은 점수에서 허용 오차 안에 있는 점만 같은 묶음이다. a≈b, b≈c라도 c가 a에서
+    # 오차 밖이면 c는 다음 묶음을 시작한다(연쇄로 묶음이 끝없이 길어지지 않는다)
+    tolerance = dense_module.TIE_TOLERANCE
+    assert tolerance == 1e-6
+    a, b, c = 0.9, 0.9 - 0.6 * tolerance, 0.9 - 1.2 * tolerance
+    assert dense_module._tie_groups([a, b, c]) == [0, 0, 1]
+    assert dense_module._tie_groups([a, a - 1e-9, b, c, c - 0.5 * tolerance, 0.5]) == [
+        0,
+        0,
+        0,
+        1,
+        1,
+        2,
+    ]
+    assert dense_module._tie_groups([]) == []
+    assert dense_module._tie_groups([0.5]) == [0]
+
+
+class FixedScores:
+    """질문과의 코사인 유사도가 정해진 값이 되는 2차원 벡터를 내는 임베더."""
+
+    dim = 2
+
+    def __init__(self, scores: dict[str, float]) -> None:
+        self.scores = scores
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        return [[self.scores[t], math.sqrt(1 - self.scores[t] ** 2)] for t in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return [1.0, 0.0]
+
+
+def test_scores_further_apart_than_the_tolerance_keep_score_order():
+    # 허용 오차보다 크게 다른 점수는 chunk_id와 상관없이 점수 순서다. 오차 안이면 chunk_id 순서다
+    scores = {"z": 0.9, "y": 0.9 - 1e-4, "x": 0.9 - 2e-4, "w": 0.9 - 2e-4 - 1e-8}
+    idx = DenseIndex(FixedScores(scores), ":memory:", "t")
+    # chunk_id 순서: w(0) < x(1) < y(2) < z(3)
+    idx.build([chunk(i, text) for i, text in enumerate(["w", "x", "y", "z"])])
+    assert [r.chunk.text for r in idx.search("q", k=4)] == ["z", "y", "w", "x"]
+    assert [r.chunk.text for r in idx.search("q", k=3)] == ["z", "y", "w"]  # 경계의 묶음에서 w
+
+
+def test_boundary_tie_needs_at_most_two_queries(tmp_path, monkeypatch):
+    # 전부 동점이어도 질의는 두 번이다(k+1개를 받고, 잘리는 묶음이 이어지면 그 묶음까지 한 번 더)
+    idx = DenseIndex(HashEmbedder(), ":memory:", "t")
+    idx.build(tied_chunks(500) + [c1, c2, c3])
+    calls = []
+    original = idx._client.query_points
+
+    def counting(*args, **kwargs):
+        calls.append(kwargs.get("limit"))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(idx._client, "query_points", counting)
+    expected = sorted(c.chunk_id for c in tied_chunks(500))[:30]
+    assert [r.chunk.chunk_id for r in idx.search("제2조 생략", k=30)] == expected
+    assert len(calls) == 2
+    calls.clear()
+    assert idx.search("예금자 보호 한도", k=1)[0].chunk == c1  # 동점이 없으면 한 번
+    assert len(calls) == 1

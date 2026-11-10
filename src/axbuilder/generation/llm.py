@@ -1,6 +1,7 @@
 """LLM 클라이언트: 로컬(Ollama)과 클라우드(Claude)를 같은 LLMClient 모양 뒤에 둔다."""
 
 import logging
+import re
 import time
 from typing import Protocol
 
@@ -42,6 +43,41 @@ class LLMUnavailableError(RuntimeError):
     """LLM을 부를 수 없다(서버 꺼짐, 시간 초과, 인증 실패 등). 메시지에 해결 방법을 담는다."""
 
 
+# URL의 계정 정보: "://" 뒤부터 경로 전의 마지막 "@"까지 (비밀번호에 "@"가 그대로 든 경우 포함)
+_URL_USERINFO = re.compile(r"(?<=://)[^\s/?#]*@")
+
+
+def strip_url_credentials(text: str) -> str:
+    """text 안 URL의 계정 정보(http://user:pass@host → http://host)를 지운다.
+
+    LLM 오류 메시지는 API 응답(503)과 서버의 경고 로그에 그대로 들어간다. 스킴("://")이 있는
+    URL만 알아본다. httpx가 찍는 요청 로그는 이 함수가 가리지 못하므로, OllamaClient는 계정
+    정보를 URL에서 떼어 auth로 넘긴다.
+    """
+    return _URL_USERINFO.sub("", text)
+
+
+def _split_ollama_url(base_url: str) -> tuple[str, tuple[str, str] | None]:
+    """(계정 정보를 뺀 URL, (사용자, 비밀번호) 또는 None). http·https URL이 아니면 ValueError.
+
+    스킴을 빠뜨린 값("user:pass@host:11434", "//user:pass@host")은 요청마다 실패하면서 오류
+    메시지에 비밀번호를 그대로 실어 보냈다. 쓸 수 없는 설정이므로 클라이언트를 만들 때 실패시키고,
+    메시지에는 받은 값을 넣지 않는다.
+    """
+    try:
+        url = httpx.URL(base_url)
+    except httpx.InvalidURL:
+        url = None
+    if url is None or url.scheme not in ("http", "https") or not url.host:
+        raise ValueError(
+            "AXB_OLLAMA_URL must be an http:// or https:// URL such as http://localhost:11434 "
+            "(the given value is not shown because it may contain credentials)"
+        )
+    if not url.userinfo:
+        return base_url, None
+    return str(url.copy_with(username=None, password=None)), (url.username, url.password)
+
+
 class OllamaClient:
     def __init__(
         self,
@@ -51,9 +87,20 @@ class OllamaClient:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         self.model = model
-        self.base_url = base_url
+        # URL의 계정 정보는 Basic 인증(auth)으로 옮기고 base_url에는 남기지 않는다.
+        # URL에 두면 오류 메시지와 httpx의 요청 로그(INFO)에 비밀번호가 찍힌다
+        self.base_url, auth = _split_ollama_url(base_url)
+        self._shown_url = self.base_url  # 오류 메시지용
         self.timeout = timeout
-        self._http = httpx.Client(base_url=base_url, timeout=timeout, transport=transport)
+        # trust_env=False: HTTP(S)_PROXY·ALL_PROXY 환경변수를 따르지 않는다. 따르면 로컬 Ollama로
+        # 가야 할 프롬프트(내부 문서 발췌)가 회사·공격자 프록시로 나간다(.netrc 인증도 쓰지 않는다)
+        self._http = httpx.Client(
+            base_url=self.base_url,
+            auth=auth,
+            timeout=timeout,
+            transport=transport,
+            trust_env=False,
+        )
 
     def generate(self, system: str, user: str, max_tokens: int = 2048) -> LLMResponse:
         payload = {
@@ -73,7 +120,7 @@ class OllamaClient:
             response.raise_for_status()
         except (httpx.ConnectError, httpx.ConnectTimeout) as e:
             raise LLMUnavailableError(
-                f"Ollama 서버({self.base_url})에 연결할 수 없습니다. "
+                f"Ollama 서버({self._shown_url})에 연결할 수 없습니다. "
                 "Ollama가 실행 중인지 확인하세요: ollama serve"
             ) from e
         except httpx.TimeoutException as e:
@@ -91,7 +138,8 @@ class OllamaClient:
             raise LLMUnavailableError(f"Ollama 오류 {status}: {detail}") from e
         except httpx.TransportError as e:
             raise LLMUnavailableError(
-                f"Ollama 서버({self.base_url})와 통신하지 못했습니다: {e}. "
+                f"Ollama 서버({self._shown_url})와 통신하지 못했습니다: "
+                f"{strip_url_credentials(str(e))}. "
                 "AXB_OLLAMA_URL과 Ollama 상태를 확인하세요"
             ) from e
         latency_ms = (time.perf_counter() - start) * 1000
