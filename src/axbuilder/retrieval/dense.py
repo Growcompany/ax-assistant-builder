@@ -15,6 +15,35 @@ MAX_BATCH_SIZE = 32  # sentence-transformers 기본값
 # 은행 코퍼스 945청크 측정(RTX 3070 Ti 8GB): 8천·1.6만·3.2만 모두 약 15~17초, 최대 2.4~3.2GiB
 MAX_BATCH_CHARS = 16_000
 
+# 점수 차가 이 값 이하면 동점으로 본다. Qdrant 로컬 모드(numpy 내적)는 비트까지 같은 벡터에도
+# 저장 위치에 따라 마지막 자리가 다른 점수를 준다: 같은 세션 안에서 약 5e-16, 색인한 세션과 다시
+# 연 세션 사이에서 약 4e-8을 쟀다(dim 1024, PR #19 리뷰). 그보다 충분히 크고, 뜻이 다른 청크의
+# 점수 차(보통 1e-3 이상)보다는 충분히 작은 값이다
+TIE_TOLERANCE = 1e-6
+
+
+def _tie_groups(scores: list[float]) -> list[int]:
+    """내림차순 점수마다 동점 묶음 번호(0부터)를 붙인다.
+
+    묶음은 그 묶음의 가장 높은 점수(기준)에서 TIE_TOLERANCE 안에 있는 점들이다. 기준에서 오차
+    밖으로 벗어난 첫 점이 다음 묶음의 기준이 된다. 이웃한 점끼리의 차로 묶으면 a≈b, b≈c가
+    이어져(연쇄) 묶음이 끝없이 길어지고, 그 안에서는 점수 순서를 잃는다. 기준에 묶으면 한 묶음의
+    폭이 TIE_TOLERANCE를 넘지 않는다.
+
+    보장하지 않는 것: 점수가 "기준 - TIE_TOLERANCE" 경계에서 흔들림 폭(약 4e-8) 안에 있는 점은
+    세션에 따라 묶음이 달라질 수 있다. 같은 벡터의 점수 차(위의 흔들림)는 경계에서 멀어 늘 한
+    묶음이다.
+    """
+    groups: list[int] = []
+    anchor = math.inf
+    group = -1
+    for score in scores:
+        if anchor - score > TIE_TOLERANCE:
+            anchor = score
+            group += 1
+        groups.append(group)
+    return groups
+
 
 class Embedder(Protocol):
     dim: int
@@ -183,27 +212,40 @@ class DenseIndex:
             )
         )
         vector = self.embedder.embed_query(query)
-        # 동점은 chunk_id 오름차순으로 정한다. 본문이 같은 청크("제2조 생략" 등)는 벡터와 점수가
-        # 같은데, Qdrant 로컬 모드는 동점을 저장 순서대로 돌려주고 그 순서가 색인한 세션과 다시 연
-        # 세션에서 다르다. k번째와 점수가 같은 점이 limit 밖에 더 있을 수 있으므로, 받아 온 마지막
-        # 점의 점수가 k번째보다 낮아질 때까지(또는 남은 점이 없을 때까지) limit을 두 배씩 늘려
-        # 동점 묶음 전체를 받아 온 뒤 정렬하고 자른다. 보통은 k+1개를 한 번 받으면 끝난다
-        limit = k + 1
-        while True:
-            # 점수 하한은 두지 않는다: BM25가 비는 질문("은?")에도 가장 가까운 청크를 돌려준다
+
+        def fetch(limit: int, score_threshold: float | None = None) -> list[ScoredChunk]:
+            # 점수 하한은 평소에는 두지 않는다: BM25가 비는 질문("은?")에도 가장 가까운 청크를 준다
             points = self._client.query_points(
                 self.collection,
                 query=vector,
                 query_filter=query_filter,
                 limit=limit,
+                score_threshold=score_threshold,
                 with_payload=True,
             ).points
-            if len(points) < limit or points[-1].score < points[k - 1].score:
-                break
-            limit *= 2
-        hits = [ScoredChunk(chunk=Chunk(**p.payload), score=p.score) for p in points]
-        hits.sort(key=lambda hit: (-hit.score, hit.chunk.chunk_id))
-        return hits[:k]
+            hits = [ScoredChunk(chunk=Chunk(**p.payload), score=p.score) for p in points]
+            hits.sort(key=lambda hit: -hit.score)
+            return hits
+
+        # 동점 묶음 안에서는 chunk_id 오름차순으로 정한다(_tie_groups). 본문이 같은 청크("제2조
+        # 생략" 등)는 벡터가 같은데, Qdrant 로컬 모드가 돌려주는 순서는 색인한 세션과 다시 연
+        # 세션에서 다르다. k에서 잘리는 묶음은 구성원 전부를 봐야 누가 남을지 정할 수 있다:
+        # k+1개를 받아 보고, k번째와 k+1번째가 같은 묶음이면 그 묶음의 끝까지(점수 하한으로) 한 번
+        # 더 받는다. 질의는 많아야 두 번이다
+        hits = fetch(k + 1)
+        if len(hits) > k:
+            groups = _tie_groups([hit.score for hit in hits])
+            if groups[k] == groups[k - 1]:
+                anchor = hits[groups.index(groups[k])].score
+                total = self._client.count(
+                    self.collection, count_filter=query_filter, exact=True
+                ).count
+                # 하한은 묶음 폭의 두 배로 넉넉히: 점수는 질의마다 마지막 자리가 흔들린다.
+                # 묶음은 아래에서 다시 나누므로 더 받아 온 점은 결과에 영향이 없다
+                hits = fetch(total, score_threshold=anchor - 2 * TIE_TOLERANCE)
+        groups = _tie_groups([hit.score for hit in hits])
+        ranked = sorted(zip(groups, hits, strict=True), key=lambda g: (g[0], g[1].chunk.chunk_id))
+        return [hit for _, hit in ranked[:k]]
 
     def chunks(self) -> list[Chunk]:
         """색인에 들어 있는 청크 전부(순서는 정하지 않음). 컬렉션이 없으면 [].
