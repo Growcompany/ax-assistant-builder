@@ -456,16 +456,20 @@ class _Service:
             bm25 = BM25Index()
             bm25.build(chunks)
             index_dir = self._index_dir(ws.id)
-            # 같은 Qdrant 폴더는 한 클라이언트만 열 수 있다: 이전 클라이언트를 닫은 뒤 새로 연다
+            info_path = index_dir / INDEX_INFO
+            # 같은 Qdrant 폴더는 한 클라이언트만 열 수 있다: 이전 클라이언트를 닫은 뒤 새로 연다.
+            # 아래에서 실패하면 캐시는 비어 있고, 다음 질문 때 폴더의 색인을 다시 연다
             self._drop_locked(ws.id)
-            # 다 만들기 전에 서버가 꺼지면 다음 시작 때 "색인 없음"으로 보게 정보 파일을 먼저 지운다
-            (index_dir / INDEX_INFO).unlink(missing_ok=True)
             index_dir.mkdir(parents=True, exist_ok=True)
             dense = DenseIndex(embedder, index_dir / "qdrant", COLLECTION)
             try:
-                dense.build(chunks)
+                # 정보 파일은 임베딩이 끝나고 저장된 점을 바꾸기 직전에 지운다.
+                # - 임베딩에서 실패(GPU 메모리 부족 등): 점도 정보 파일도 그대로라 이전 색인으로
+                #   계속 답한다
+                # - 점을 바꾸는 도중 실패하거나 서버가 꺼짐: 정보 파일이 없어 "색인 없음"(409)
+                dense.build(chunks, before_replace=lambda: info_path.unlink(missing_ok=True))
                 _write_json(
-                    index_dir / INDEX_INFO,
+                    info_path,
                     {
                         "embedder": self._embedder_name,
                         "dim": embedder.dim,

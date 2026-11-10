@@ -917,3 +917,144 @@ def test_create_workspace_rejects_invisible_format_characters(client, settings):
     roles = {"상담​원": ["public"]}
     assert client.post("/workspaces", json={**WS, "roles": roles}).status_code == 422
     assert not (settings.data_dir / "workspaces" / "bank").exists()
+
+
+# ---- 전체 코드 감사: 재색인 실패, 덜 만들어진 색인, 재시작 뒤 동점 순서 ----
+
+
+class FlakyEmbedder(HashEmbedder):
+    """failing을 켜면 문서 임베딩(embed)이 실패한다 (GPU 메모리 부족 등). 질문 임베딩은 된다."""
+
+    failing = False
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        if self.failing:
+            raise RuntimeError("CUDA out of memory")
+        return super().embed(texts)
+
+
+def index_info_path(settings: Settings) -> Path:
+    return settings.data_dir / "workspaces" / "bank" / "index" / "index.json"
+
+
+def test_failed_reindex_keeps_previous_index_usable(settings):
+    # 감사: 재색인이 임베딩에서 실패하면 Qdrant의 옛 점은 그대로인데 index.json이 먼저 지워져
+    # 잘 돌던 색인까지 409가 됐다
+    embedder = FlakyEmbedder()
+    first = RecordingLLM("내용 [1].")
+    with open_client(settings, first, embedder, raise_server_exceptions=False) as client:
+        assert setup_indexed(client) == 3
+        before = ask(client, role="준법감시")
+        assert before.status_code == 200 and before.json()["citations"]
+        info_before = index_info_path(settings).read_text(encoding="utf-8")
+
+        assert upload(client, "guide.md", GUIDE_MD, GUIDE_META).status_code == 201
+        embedder.failing = True
+        assert client.post("/workspaces/bank/index").status_code == 500
+
+        after = ask(client, role="준법감시")  # 같은 프로세스: 이전 색인으로 계속 답한다
+        assert after.status_code == 200
+        assert after.json()["citations"] == before.json()["citations"]
+        assert index_info_path(settings).read_text(encoding="utf-8") == info_before
+        assert "내부전용표식XYZ" not in first.last_user  # 새 문서는 아직 색인되지 않았다
+    second = RecordingLLM("내용 [1].")
+    with open_client(settings, second, FlakyEmbedder()) as client:  # 재시작 뒤에도
+        restarted = ask(client, role="준법감시")
+        assert restarted.status_code == 200
+        assert restarted.json()["citations"] == before.json()["citations"]
+        assert second.last_user == first.last_user
+        # 임베더가 돌아오면 다시 색인할 수 있고 새 문서가 들어간다
+        assert client.post("/workspaces/bank/index").json() == {"chunks": 5}
+        assert ask(client, role="준법감시").status_code == 200
+        assert "내부전용표식XYZ" in second.last_user
+
+
+def test_reindex_that_fails_while_writing_points_leaves_no_usable_index(monkeypatch, settings, llm):
+    # 반대 경우: 임베딩은 끝났고 저장소를 바꾸는 도중에 실패했다. 점이 반쯤 바뀌었을 수 있으므로
+    # "색인 없음"(409)으로 본다. 재시작 뒤에도 같다
+    from qdrant_client import QdrantClient
+
+    with open_client(settings, llm, raise_server_exceptions=False) as client:
+        assert setup_indexed(client) == 3
+        assert ask(client).status_code == 200
+
+        def broken_upsert(self, *args, **kwargs):
+            raise OSError("disk full")
+
+        with monkeypatch.context() as patched:
+            patched.setattr(QdrantClient, "upsert", broken_upsert)
+            assert client.post("/workspaces/bank/index").status_code == 500
+        assert not index_info_path(settings).exists()
+        r = ask(client)
+        assert r.status_code == 409 and "index" in r.json()["detail"]
+    with open_client(settings, llm) as client:
+        assert ask(client).status_code == 409
+        assert client.post("/workspaces/bank/index").json() == {"chunks": 3}
+        assert ask(client).status_code == 200
+
+
+def test_restart_with_chunk_count_mismatch_needs_reindex(settings, llm):
+    # index.json이 말하는 청크 수와 Qdrant에 든 수가 다르면 색인이 온전하지 않다
+    with open_client(settings, llm) as client:
+        assert setup_indexed(client) == 3
+    info_path = index_info_path(settings)
+    info = info_path.read_text(encoding="utf-8")
+    assert '"chunks": 3' in info
+    for wrong in (2, 4):
+        info_path.write_text(info.replace('"chunks": 3', f'"chunks": {wrong}'), encoding="utf-8")
+        with open_client(settings, llm) as client:
+            r = ask(client)
+            assert r.status_code == 409 and "index" in r.json()["detail"]
+    info_path.write_text(info, encoding="utf-8")
+    with open_client(settings, llm) as client:
+        assert ask(client).status_code == 200
+
+
+def test_restart_after_interrupted_indexing_needs_reindex(settings, llm):
+    # 색인 도중 꺼진 상태: Qdrant에 점은 있는데 index.json(다 만든 뒤에 쓴다)이 없다
+    with open_client(settings, llm) as client:
+        assert setup_indexed(client) == 3
+    index_info_path(settings).unlink()
+    assert (settings.data_dir / "workspaces" / "bank" / "index" / "qdrant").is_dir()
+    with open_client(settings, llm) as client:
+        r = ask(client)
+        assert r.status_code == 409 and "index" in r.json()["detail"]
+        assert llm.calls == []
+        assert client.post("/workspaces/bank/index").json() == {"chunks": 3}
+        assert ask(client).status_code == 200
+
+
+def tied_documents(count: int) -> list[tuple[str, bytes, dict]]:
+    """본문이 같은 문서들: 조항마다 청크 본문이 서로 같아 BM25·dense 점수가 동점이다."""
+    text = "제1조(목적) 이 규정은 보호 한도를 정한다.\n제2조 생략\n".encode()
+    return [
+        (f"law-{i:02d}.txt", text, {**META, "doc_id": f"law-{i:02d}", "title": "같은 규정"})
+        for i in range(12)
+    ]
+
+
+def bm25_order(client: TestClient, query: str) -> list[str]:
+    """지금 색인의 BM25만으로 검색한 chunk_id 순서 (하이브리드에 가려지지 않게 직접 본다)."""
+    service = client.app.state.service
+    with service.lock("bank"):
+        bm25 = service.loaded_index("bank").retriever.bm25
+        return [s.chunk.chunk_id for s in bm25.search(query, k=30)]
+
+
+def test_tied_chunks_keep_their_order_after_restart(settings):
+    # BM25는 동점을 색인 순서로 정한다. 재시작하면 Qdrant에서 꺼낸 청크(순서 없음)로 BM25를 다시
+    # 만들므로, 색인할 때와 같은 순서로 정렬해 넣지 않으면 동점 순서가 바뀐다
+    first = RecordingLLM("내용 [1].")
+    with open_client(settings, first) as client:
+        assert setup_indexed(client, *reversed(tied_documents(12))) == 24
+        built_bm25 = bm25_order(client, "보호 한도")
+        built = ask(client, question="보호 한도").json()
+    expected = [f"law-{i:02d}" for i in range(12)]
+    assert [cid.split("::")[0] for cid in built_bm25[:12]] == expected  # 동점 12개: doc_id 순서
+    for _ in range(2):
+        again = RecordingLLM("내용 [1].")
+        with open_client(settings, again) as client:
+            assert bm25_order(client, "보호 한도") == built_bm25
+            restarted = ask(client, question="보호 한도").json()
+        assert restarted["citations"] == built["citations"]
+        assert again.last_user == first.last_user  # 프롬프트에 들어간 자료와 순서가 같다

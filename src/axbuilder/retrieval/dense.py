@@ -3,6 +3,7 @@
 import hashlib
 import math
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Protocol
 
@@ -121,10 +122,17 @@ class DenseIndex:
             # 로컬 모드 폴더는 잠금 파일 때문에 한 번에 클라이언트 하나만 열 수 있다(학습 노트)
             self._client = QdrantClient(path=str(location))
 
-    def build(self, chunks: list[Chunk]) -> None:
-        """색인을 새로 만든다 (이전 색인은 버린다)."""
+    def build(self, chunks: list[Chunk], before_replace: Callable[[], None] | None = None) -> None:
+        """색인을 새로 만든다 (이전 색인은 버린다).
+
+        before_replace는 임베딩이 끝나고 저장된 점을 바꾸기 직전에 한 번 부른다. 임베딩이
+        실패하면 부르지 않는다. API는 여기서 "색인 완성" 표시(index.json)를 지운다: 그 전에
+        실패하면 이전 색인이 그대로 쓸 수 있고, 그 뒤에 실패하면 덜 만들어진 색인으로 보인다.
+        """
         # 임베딩이 실패해도 기존 색인이 남도록 컬렉션을 지우기 전에 계산한다
         vectors = self.embedder.embed([c.text for c in chunks])
+        if before_replace is not None:
+            before_replace()
         if self._client.collection_exists(self.collection):
             # Windows의 로컬 모드(qdrant-client 1.20)는 delete_collection이 컬렉션의 SQLite 파일을
             # 닫지 않은 채 지우려다 조용히 실패하고, 같은 이름으로 다시 만들면 그 파일의 옛 점을
@@ -174,15 +182,28 @@ class DenseIndex:
                 ]
             )
         )
-        # 점수 하한은 두지 않는다: BM25가 비는 질문("은?")에도 가장 가까운 청크를 돌려준다
-        points = self._client.query_points(
-            self.collection,
-            query=self.embedder.embed_query(query),
-            query_filter=query_filter,
-            limit=k,
-            with_payload=True,
-        ).points
-        return [ScoredChunk(chunk=Chunk(**p.payload), score=p.score) for p in points]
+        vector = self.embedder.embed_query(query)
+        # 동점은 chunk_id 오름차순으로 정한다. 본문이 같은 청크("제2조 생략" 등)는 벡터와 점수가
+        # 같은데, Qdrant 로컬 모드는 동점을 저장 순서대로 돌려주고 그 순서가 색인한 세션과 다시 연
+        # 세션에서 다르다. k번째와 점수가 같은 점이 limit 밖에 더 있을 수 있으므로, 받아 온 마지막
+        # 점의 점수가 k번째보다 낮아질 때까지(또는 남은 점이 없을 때까지) limit을 두 배씩 늘려
+        # 동점 묶음 전체를 받아 온 뒤 정렬하고 자른다. 보통은 k+1개를 한 번 받으면 끝난다
+        limit = k + 1
+        while True:
+            # 점수 하한은 두지 않는다: BM25가 비는 질문("은?")에도 가장 가까운 청크를 돌려준다
+            points = self._client.query_points(
+                self.collection,
+                query=vector,
+                query_filter=query_filter,
+                limit=limit,
+                with_payload=True,
+            ).points
+            if len(points) < limit or points[-1].score < points[k - 1].score:
+                break
+            limit *= 2
+        hits = [ScoredChunk(chunk=Chunk(**p.payload), score=p.score) for p in points]
+        hits.sort(key=lambda hit: (-hit.score, hit.chunk.chunk_id))
+        return hits[:k]
 
     def chunks(self) -> list[Chunk]:
         """색인에 들어 있는 청크 전부(순서는 정하지 않음). 컬렉션이 없으면 [].
