@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>AX Assistant Builder</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/app.css">
+  <script src="/static/js/theme-init.js"></script>
+  <script type="module" src="/static/js/main.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main">본문으로 건너뛰기</a>
+
+  <div class="app" id="app" data-evidence="off">
+    <button class="backdrop" id="backdrop" type="button" tabindex="-1" aria-label="워크스페이스 목록 닫기" hidden></button>
+
+    <aside class="sidebar" id="sidebar" aria-label="워크스페이스">
+      <div class="brand">
+        <img class="brand-mark" src="/static/favicon.svg" alt="" width="26" height="26">
+        <div class="brand-text">
+          <span class="brand-name">AX Assistant Builder</span>
+          <span class="brand-sub">문서 근거로 답하는 사내 어시스턴트</span>
+        </div>
+      </div>
+
+      <nav class="ws-nav" aria-label="워크스페이스 목록">
+        <h2 class="side-heading" id="ws-heading">워크스페이스</h2>
+        <ul class="ws-list" id="ws-list" aria-labelledby="ws-heading"></ul>
+        <p class="side-note" id="ws-note" hidden></p>
+      </nav>
+
+      <div class="side-actions">
+        <button class="btn btn-block" id="open-new-workspace" type="button">
+          <span class="icon icon-plus" aria-hidden="true"></span>새 워크스페이스
+        </button>
+        <button class="btn btn-quiet btn-block" id="side-demo" type="button" hidden>예시 은행 불러오기</button>
+      </div>
+
+      <div class="side-foot">
+        <p class="server" id="server" data-state="unknown">
+          <span class="server-mark" aria-hidden="true"></span>
+          <span id="server-text">서버 확인 중</span>
+        </p>
+        <button class="btn btn-quiet btn-icon" id="theme-toggle" type="button" aria-label="어두운 화면으로 바꾸기">
+          <span class="icon icon-moon" aria-hidden="true"></span>
+        </button>
+      </div>
+    </aside>
+
+    <main class="main" id="main" tabindex="-1">
+      <div class="topbar">
+        <button class="btn btn-quiet btn-icon" id="open-sidebar" type="button" aria-label="워크스페이스 목록 열기" aria-controls="sidebar" aria-expanded="false">
+          <span class="icon icon-menu" aria-hidden="true"></span>
+        </button>
+        <span class="topbar-title">AX Assistant Builder</span>
+      </div>
+      <div class="view" id="view">
+        <p class="boot-note">화면을 불러오는 중입니다.</p>
+      </div>
+    </main>
+
+    <aside class="evidence" id="evidence" aria-label="근거 원문" tabindex="-1"></aside>
+  </div>
+
+  <div class="sr-only" id="live" role="status" aria-live="polite"></div>
+
+  <dialog class="dialog" id="new-workspace" aria-labelledby="nw-title">
+    <form class="dialog-form" id="nw-form" method="dialog" novalidate>
+      <header class="dialog-head">
+        <h2 id="nw-title">새 워크스페이스</h2>
+        <button class="btn btn-quiet btn-icon" id="nw-close" type="button" aria-label="닫기">
+          <span class="icon icon-close" aria-hidden="true"></span>
+        </button>
+      </header>
+
+      <div class="dialog-body">
+        <p class="dialog-lead">회사 하나가 워크스페이스 하나입니다. 역할마다 볼 수 있는 문서 등급을 정하면, 질문할 때 그 역할이 볼 수 있는 문서에서만 답을 찾습니다.</p>
+
+        <div class="field">
+          <label for="nw-id">워크스페이스 id</label>
+          <input id="nw-id" name="id" type="text" autocomplete="off" spellcheck="false" maxlength="32" aria-describedby="nw-id-hint nw-id-error">
+          <p class="field-hint" id="nw-id-hint">소문자·숫자·하이픈(-) 2~32자. 주소와 저장 폴더 이름이 되며 나중에 바꿀 수 없습니다.</p>
+          <p class="field-error" id="nw-id-error" hidden></p>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="nw-name">이름</label>
+            <input id="nw-name" name="name" type="text" autocomplete="off" maxlength="100" aria-describedby="nw-name-error">
+            <p class="field-error" id="nw-name-error" hidden></p>
+          </div>
+          <div class="field">
+            <label for="nw-industry">업종 <span class="optional">선택</span></label>
+            <input id="nw-industry" name="industry" type="text" autocomplete="off" maxlength="50" placeholder="예: finance" aria-describedby="nw-industry-error">
+            <p class="field-error" id="nw-industry-error" hidden></p>
+          </div>
+        </div>
+
+        <fieldset class="roles-field" aria-describedby="nw-roles-hint nw-roles-error">
+          <legend>역할과 볼 수 있는 문서 등급</legend>
+          <p class="field-hint" id="nw-roles-hint">public은 누구나 볼 수 있는 문서, internal은 내부 문서입니다.</p>
+          <ul class="role-rows" id="nw-roles"></ul>
+          <button class="btn btn-quiet" id="nw-add-role" type="button">
+            <span class="icon icon-plus" aria-hidden="true"></span>역할 추가
+          </button>
+          <p class="field-error" id="nw-roles-error" hidden></p>
+        </fieldset>
+
+        <div class="notice notice-error" id="nw-error" role="alert" hidden></div>
+      </div>
+
+      <footer class="dialog-foot">
+        <button class="btn" id="nw-cancel" type="button">취소</button>
+        <button class="btn btn-primary" id="nw-submit" type="submit">워크스페이스 만들기</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <noscript><p class="noscript">이 화면은 자바스크립트가 켜져 있어야 동작합니다.</p></noscript>
+</body>
+</html>
