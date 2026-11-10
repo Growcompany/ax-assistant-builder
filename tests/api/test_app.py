@@ -833,12 +833,12 @@ def test_upload_pdf_with_too_many_pages_422(monkeypatch, client, settings):
     assert "workspaces/bank/documents/pages.pdf" not in files_under(settings.data_dir)
 
 
-def test_upload_hwpx_with_too_many_elements_422(monkeypatch, client, settings):
+def test_upload_hwpx_with_too_many_parser_events_422(monkeypatch, client, settings):
     client.post("/workspaces", json=WS)
-    terms = hwpx_bytes(["제1조(목적) 가", "제2조(정의) 나"])  # 요소 7개
-    monkeypatch.setattr(loaders, "HWPX_MAX_ELEMENTS", 7)
+    terms = hwpx_bytes(["제1조(목적) 가", "제2조(정의) 나"])  # 요소 7개 + 글자 조각 2개
+    monkeypatch.setattr(loaders, "HWPX_MAX_EVENTS", 9)
     assert upload(client, "terms.hwpx", terms).status_code == 201
-    monkeypatch.setattr(loaders, "HWPX_MAX_ELEMENTS", 6)
+    monkeypatch.setattr(loaders, "HWPX_MAX_EVENTS", 8)
     r = upload(client, "terms.hwpx", terms, {**META, "doc_id": "bomb"})
     assert r.status_code == 422 and "상한" in r.json()["detail"]
     assert "workspaces/bank/documents/bomb.hwpx" not in files_under(settings.data_dir)

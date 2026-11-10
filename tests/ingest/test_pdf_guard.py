@@ -4,6 +4,7 @@
 """
 
 import io
+import struct
 import tracemalloc
 import zlib
 
@@ -249,7 +250,7 @@ def test_page_limit_resets_per_page_but_document_limit_does_not(tmp_path, monkey
         load_document(path, meta, "bank")
 
 
-# ---- 쪽 수 폭탄 (v0.1.0 보안 점검): 내용 없는 쪽 10만 개(7MB)가 27초·510MB를 썼다 ----
+# ---- 쪽 수 폭탄 (v0.1.0 보안 점검): 내용 없는 쪽 10만 개(8MB)가 30초·498MB를 썼다 ----
 
 
 def empty_pages_pdf(pages: int, declared_count: int | None = None) -> bytes:
@@ -331,6 +332,7 @@ def test_page_count_stops_iterating_just_past_the_limit(tmp_path):
         (pdftypes, "decompress_corrupted"),
         (pdftypes, "lzwdecode"),
         (pdftypes, "rldecode"),
+        (pdf_guard.PDFDocument, "_get_objects"),
         (pdf_guard.PDFLayoutAnalyzer, "begin_page"),
         (pdf_guard.PDFLayoutAnalyzer, "render_char"),
         (pdf_guard.PDFLayoutAnalyzer, "paint_path"),
@@ -350,3 +352,166 @@ def test_install_is_idempotent_and_keeps_guards():
     assert isinstance(pdftypes.zlib, pdf_guard._BoundedZlib)
     assert pdftypes.rldecode is pdf_guard._rldecode
     assert pdf_guard.PDFLayoutAnalyzer.render_char is pdf_guard._render_char
+
+
+# ---- 객체 수 (PR #19 보안 리뷰): xref가 선언한 객체 수, 객체 스트림(ObjStm) ----
+
+
+def xref_stream_pdf(
+    objs: dict[int, bytes], entries: list[tuple[int, int, int] | None], size: int, root: int
+) -> bytes:
+    """xref 스트림(PDF 1.5)을 쓰는 PDF. entries의 None은 그 번호 객체의 파일 위치로 채운다.
+
+    xref 스트림 자신은 objs 다음 번호를 쓴다. /Index는 [0 size]: size가 entries보다 크면 데이터
+    없이 객체 수만 선언한 것이 된다.
+    """
+    out = io.BytesIO()
+    out.write(b"%PDF-1.5\n")
+    offsets = {}
+    for num in sorted(objs):
+        offsets[num] = out.tell()
+        out.write(b"%d 0 obj\n%s\nendobj\n" % (num, objs[num]))
+    xref_id = max(objs) + 1
+    xref_at = out.tell()
+    data = b""
+    for num, entry in enumerate(entries):
+        if entry is None:
+            entry = (1, xref_at if num == xref_id else offsets[num], 0)
+        data += struct.pack(">BIB", *entry)
+    out.write(
+        b"%d 0 obj\n<< /Type /XRef /W [1 4 1] /Size %d /Index [0 %d] /Root %d 0 R /Length %d >>\n"
+        b"stream\n%s\nendstream\nendobj\nstartxref\n%d\n%%%%EOF\n"
+        % (xref_id, size, size, root, len(data), data, xref_at)
+    )
+    return out.getvalue()
+
+
+def xref_scan_pdf(declared: int) -> bytes:
+    """카탈로그에 /Pages가 없고 xref가 객체 declared개를 선언한다(데이터는 3개뿐, 200바이트 안팎).
+
+    쪽이 하나도 안 나오면 pdfminer는 xref의 모든 객체 번호를 훑어 /Type /Page를 찾는다.
+    """
+    return xref_stream_pdf({1: b"<< /Type /Catalog >>"}, [(0, 0, 0), None, None], declared, 1)
+
+
+def objstm_pdf(count: int, trailing: bytes = b"", second: bytes = b"null") -> bytes:
+    """카탈로그(객체 2)가 객체 스트림(객체 1) 안에 있는 1쪽 PDF.
+
+    count는 스트림이 선언하는 객체 수(/N). count가 2 이상이면 둘째 객체(객체 6)는 second이고
+    나머지는 선언만 한다. trailing은 선언한 객체들 뒤에 붙이는 내용이다.
+    """
+    catalog = b"<< /Type /Catalog /Pages 3 0 R >> "
+    pairs = b"2 0 " + (b"6 %d " % len(catalog) if count >= 2 else b"")
+    raw = pairs + catalog + (second + b" " if count >= 2 else b"") + trailing
+    packed = zlib.compress(raw, 9)
+    objs = {
+        1: b"<< /Type /ObjStm /N %d /First %d /Filter /FlateDecode /Length %d >>\nstream\n%s\n"
+        b"endstream" % (count, len(pairs), len(packed), packed),
+        3: b"<< /Type /Pages /Count 1 /Kids [4 0 R] >>",
+        4: b"<< /Type /Page /Parent 3 0 R /MediaBox [0 0 10 10] >>",
+    }
+    second_entry = (2, 1, 1) if count >= 2 else (0, 0, 0)
+    entries = [(0, 0, 0), None, (2, 1, 0), None, None, None, second_entry]  # 5번은 xref 스트림
+    return xref_stream_pdf(objs, entries, 7, 2)
+
+
+def test_default_object_limit():
+    assert loaders.PDF_MAX_OBJECTS == 1_000_000
+
+
+def test_xref_declaring_too_many_objects_is_rejected_without_scanning(tmp_path, monkeypatch):
+    # 199바이트 PDF가 객체 10^12개를 선언하면 쪽 세기가 끝나지 않았다(객체 하나에 약 35µs).
+    # 선언한 수가 상한을 넘으면 훑기 전에 거절한다
+    monkeypatch.setattr(loaders, "PDF_MAX_OBJECTS", 1000)
+    scanned = []
+    original = pdf_guard.PDFPage.create_pages
+    monkeypatch.setattr(
+        pdf_guard.PDFPage, "create_pages", lambda doc: scanned.append(1) or original(doc)
+    )
+    path = tmp_path / "xref.pdf"
+    path.write_bytes(xref_scan_pdf(10**12))
+    assert path.stat().st_size < 256
+    with pytest.raises(DocumentTooLargeError, match="more than 1,000 objects"):
+        load_document(path, meta, "bank")
+    assert scanned == []
+    path.write_bytes(xref_scan_pdf(1001))
+    with pytest.raises(DocumentTooLargeError, match="more than 1,000 objects"):
+        load_document(path, meta, "bank")
+    assert scanned == []
+
+
+def test_xref_at_object_limit_is_scanned_only_once(tmp_path, monkeypatch):
+    # 상한에 딱 맞으면 통과한다. 쪽이 0개면 pdf.pages(같은 훑기를 다시 한다)를 부르지 않는다
+    monkeypatch.setattr(loaders, "PDF_MAX_OBJECTS", 1000)
+    scans = []
+    original = pdf_guard.PDFPage.create_pages
+    monkeypatch.setattr(
+        pdf_guard.PDFPage, "create_pages", lambda doc: scans.append(1) or original(doc)
+    )
+    path = tmp_path / "xref.pdf"
+    path.write_bytes(xref_scan_pdf(1000))
+    assert load_document(path, meta, "bank").pages == []
+    assert scans == [1]
+
+
+def test_classic_xref_tables_count_toward_object_limit(tmp_path, monkeypatch):
+    path = tmp_path / "pages.pdf"
+    path.write_bytes(make_multipage_pdf([glyph_ops(5)] * 3))  # 객체 9개 + 빈 0번 항목
+    monkeypatch.setattr(loaders, "PDF_MAX_OBJECTS", 9)
+    assert len(load_document(path, meta, "bank").pages) == 3
+    monkeypatch.setattr(loaders, "PDF_MAX_OBJECTS", 8)
+    with pytest.raises(DocumentTooLargeError, match="more than 8 objects"):
+        load_document(path, meta, "bank")
+
+
+def test_object_stream_document_still_parses(tmp_path):
+    path = tmp_path / "objstm.pdf"
+    path.write_bytes(objstm_pdf(2, second=b"<< /Kind (second) >>"))
+    assert [p.text for p in load_document(path, meta, "bank").pages] == [""]
+    with pdf_guard.object_budget(100), pdfplumber.open(path) as pdf:
+        assert pdf.doc.getobj(6) == {"Kind": b"second"}
+        everything, declared = pdf_guard._original_get_objects(pdf.doc, pdf.doc.getobj(1))
+        # 선언한 객체 뒤에 아무것도 없으면 pdfminer 원래 결과와 같다 (PDFObjRef는 ==가 없어 repr로)
+        assert repr(pdf.doc._parsed_objs[1]) == repr((everything, declared))
+        assert len(everything) == 6 and declared == 2
+
+
+def test_object_stream_parsing_stops_at_declared_objects(tmp_path):
+    # pdfminer는 객체 스트림을 /N과 무관하게 끝까지 파싱해 모두 들고 있는다. 선언한 객체 뒤에
+    # "[]"를 채운 8.5KB PDF가 여는 단계에서 23.6초·343MB를 썼다. 쓰이는 것은 앞의 3N개
+    # (번호·위치 쌍 2N + 객체 N)뿐이다
+    path = tmp_path / "objstm.pdf"
+    path.write_bytes(objstm_pdf(1, trailing=b"[]" * 50_000))
+    assert path.stat().st_size < 2048
+    with pdf_guard.object_budget(100), pdfplumber.open(path) as pdf:
+        parsed, declared = pdf.doc._parsed_objs[1]
+        assert declared == 1 and len(parsed) == 3
+        assert len(pdf.pages) == 1
+    with pdfplumber.open(path) as pdf:  # 블록 밖: pdfminer 원래 동작
+        assert len(pdf.doc._parsed_objs[1][0]) == 50_003
+
+
+def test_object_stream_declared_objects_count_toward_object_limit(tmp_path, monkeypatch):
+    path = tmp_path / "objstm.pdf"
+    path.write_bytes(objstm_pdf(2))
+    monkeypatch.setattr(loaders, "PDF_MAX_OBJECTS", 9)  # xref 7개 + 스트림이 선언한 2개
+    assert len(load_document(path, meta, "bank").pages) == 1
+    monkeypatch.setattr(loaders, "PDF_MAX_OBJECTS", 8)
+    with pytest.raises(DocumentTooLargeError, match="more than 8 objects"):
+        load_document(path, meta, "bank")
+    path.write_bytes(objstm_pdf(10**9))  # 선언만 큰 스트림
+    monkeypatch.setattr(loaders, "PDF_MAX_OBJECTS", 1000)
+    with pytest.raises(DocumentTooLargeError, match="more than 1,000 objects"):
+        load_document(path, meta, "bank")
+
+
+def test_object_budget_is_scoped_to_the_block(tmp_path):
+    path = tmp_path / "xref.pdf"
+    path.write_bytes(xref_scan_pdf(50))
+    with pdfplumber.open(path) as pdf:
+        with pdf_guard.object_budget(49), pytest.raises(pdf_guard.PDFObjectLimitError):
+            pdf_guard.check_object_count(pdf.doc)
+        with pdf_guard.object_budget(50):
+            pdf_guard.check_object_count(pdf.doc)
+        with pytest.raises(RuntimeError, match="object_budget"):
+            pdf_guard.check_object_count(pdf.doc)  # 블록 밖에서 부르면 상한 없이 통과하지 않는다
