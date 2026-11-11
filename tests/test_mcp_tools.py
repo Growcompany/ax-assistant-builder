@@ -1,6 +1,6 @@
 """MCP 도구(Task 16). 도구 로직은 mcp 패키지 없이 부를 수 있는 함수라 프로토콜 없이 검사한다.
 
-mcp 패키지가 있어야 하는 부분(FastMCP 서버 조립)은 설치돼 있을 때만 돈다.
+mcp 패키지가 있어야 하는 부분(MCPServer 조립)은 설치돼 있을 때만 돈다.
 """
 
 import sys
@@ -241,3 +241,18 @@ def test_build_server_registers_the_tools(service):
     pytest.importorskip("mcp")  # 선택 설치([mcp])가 있을 때만
     assert build_server(service) is not None
     assert build_server(service, Fixed("bank", "상담원")) is not None
+
+
+def test_tool_errors_reach_the_client_with_their_message(service):
+    pytest.importorskip("mcp")
+    import asyncio
+
+    from mcp.server.mcpserver.exceptions import ToolError as McpToolError
+
+    server = build_server(service)
+    with pytest.raises(McpToolError) as error:
+        asyncio.run(
+            server.call_tool("ask", {"workspace": "bank", "question": "x", "role": "없는역할"})
+        )
+    assert "역할" in str(error.value)
+    assert "Traceback" not in str(error.value)

@@ -122,22 +122,32 @@ def ask_tool(
 
 
 def build_server(service: Any, fixed: Fixed | None = None) -> Any:
-    """FastMCP 서버에 도구를 등록해 돌려준다. mcp 패키지가 있어야 한다."""
-    from mcp.server.fastmcp import FastMCP
+    """MCP 서버에 도구를 등록해 돌려준다. mcp 패키지(2.x)가 있어야 한다."""
+    # mcp 2.x에서 FastMCP가 MCPServer로 바뀌었다. 1.x는 지원하지 않는다(pyproject의 mcp>=2)
+    from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError as McpToolError
 
-    server = FastMCP("axbuilder")
+    def surfaced(call: Any, *args: Any, **kwargs: Any) -> Any:
+        # SDK는 자기 ToolError의 문장만 클라이언트에 전하고, 다른 예외는 문장을 숨긴다
+        try:
+            return call(*args, **kwargs)
+        except ToolError as e:
+            raise McpToolError(str(e)) from None
+
+    # 기본 log_level은 INFO라 요청마다 stderr에 한 줄씩 찍는다
+    server = MCPServer("axbuilder", log_level="WARNING")
 
     @server.tool()
     def list_workspaces() -> list[dict[str, Any]]:
         """질문할 수 있는 워크스페이스 목록(id, 이름, 역할, 문서 수, 색인 상태)."""
-        return list_workspaces_tool(service, fixed)
+        return surfaced(list_workspaces_tool, service, fixed)
 
     if fixed is not None:
 
         @server.tool()
         def ask(question: str) -> dict[str, Any]:
             """회사 문서를 근거로 질문에 답한다. 답변, 인용(문서·조항), 인용한 원문을 돌려준다."""
-            return ask_tool(service, question, fixed=fixed)
+            return surfaced(ask_tool, service, question, fixed=fixed)
 
     else:
 
@@ -145,7 +155,7 @@ def build_server(service: Any, fixed: Fixed | None = None) -> Any:
         def ask(workspace: str, question: str, role: str | None = None) -> dict[str, Any]:
             """회사 문서를 근거로 질문에 답한다. workspace는 list_workspaces의 id, role은 그
             워크스페이스의 역할 이름(역할이 하나뿐이면 생략 가능). 답변, 인용, 원문을 돌려준다."""
-            return ask_tool(service, question, workspace=workspace, role=role)
+            return surfaced(ask_tool, service, question, workspace=workspace, role=role)
 
     return server
 

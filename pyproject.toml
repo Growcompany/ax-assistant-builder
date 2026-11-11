@@ -30,7 +30,7 @@ ml = [
 ]
 # MCP 서버(axb mcp)용. 기본 설치와 단위 테스트는 이것 없이 돈다
 mcp = [
-    "mcp",
+    "mcp>=2",
 ]
 
 [project.scripts]
