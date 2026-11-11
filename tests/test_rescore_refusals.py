@@ -127,3 +127,25 @@ def test_partial_recall_counts_as_evidence_in_context():
     assert result["rows"][0]["evidence_in_context"] is True
     text = rescore_refusals.format_rescore("x", result)
     assert "- 새 판정에서 근거가 있는데 거절(over_refusals): 1 (040)" in text
+
+
+def test_report_normalized_by_an_older_paraphrase_rule_is_judged_on_the_raw_text():
+    # Task 20 이후의 보고서: 그때 PARAPHRASE로 본 답은 answer가 이미 고정 문구다. answer로
+    # 판정하면 EXACT가 되어 그때의 판정을 되풀이하므로, 원문(raw_answer)으로 다시 판정한다
+    raw = "자료 [1]에 따르면 미성년자는 가입 대상에 포함되지 않습니다."
+    row = item("bank-007", "lookup", REFUSAL_TEXT, True, 1.0, None)
+    row.update({"raw_answer": raw, "refusal_kind": "paraphrase"})
+    kept = item("bank-048", "out_of_scope", REFUSAL_TEXT, True, None, None)
+    kept.update({"raw_answer": REFUSAL_TEXT, "refusal_kind": "exact"})
+    result = rescore_refusals.rescore({"items": [row, kept]})
+    first, second = result["rows"]
+    assert first["kind"].value == "none" and first["after"] is False
+    assert first["stored_agrees"] is False and first["raw_agrees"] is False
+    assert second["kind"].value == "exact" and second["stored_agrees"] is True
+    text = rescore_refusals.format_rescore("x", result)
+    assert (
+        "- 보고서에 저장된 판정(`refusal_kind`)과 지금 규칙의 판정이 다른 문항: "
+        "1 (007 paraphrase→none)"
+    ) in text
+    assert "- `answer`와 모델 원문의 판정이 다른 문항: 1/2 (007)" in text
+    assert "- 새 판정에서 근거가 있는데 거절(over_refusals): 0 (-)" in text

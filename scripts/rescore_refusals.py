@@ -5,10 +5,11 @@
 전(strict) = 정해진 문구(EXACT)만 거절로 센다. v0.2.0까지의 규칙이다.
 후        = 문구를 바꿔 말한 거절(PARAPHRASE)도 거절로 센다. classify_refusal의 판정이다.
 
-보고서 항목의 `answer`로 판정한다. `answer`는 그때의 규칙으로 정규화한 텍스트라서, 정해진 문구로
-거절한 답은 고정 문구로 바뀌어 있고(→ EXACT) 그 밖의 답은 인용 번호만 다시 매긴 모델 원문이다.
-판정은 인용 표시를 지우고 하므로 번호가 달라도 결과는 같아야 한다. 보고서에 모델 원문
-(`raw_answer` 또는 `llm.text`)이 있으면 그것으로도 판정해 두 결과가 다른 문항을 알려 준다.
+보고서에 모델 원문(`raw_answer` 또는 `llm.text`)이 있으면 그것으로 판정하고, 없으면 `answer`로
+판정한다. `answer`는 보고서를 만들 때의 규칙으로 정규화한 텍스트다: 그때 거절로 본 답은 고정
+문구로 바뀌어 있다. v0.2.0까지의 보고서는 정해진 문구의 거절만 바뀌어 있어 어느 쪽으로 판정해도
+같지만, 바꿔 말한 거절까지 정규화한 보고서(Task 20 이후)는 `answer`로 판정하면 그때의 판정을
+그대로 되풀이하게 된다. 그래서 원문을 먼저 쓰고, 두 텍스트의 판정이 다른 문항을 알려 준다.
 
 지표도 두 가지로 낸다. 기존 지표는 "범위 밖 문항이면 거절이 정답"이고, 근거 기준 지표는
 "검색 상위 k에 라벨된 근거가 하나도 없으면 거절이 정답"이다(문항의 recall_at_k > 0으로 정한다).
@@ -39,8 +40,9 @@ def rescore(report: dict[str, Any]) -> dict[str, Any]:
     for item in report["items"]:
         if "answer" not in item:
             continue
-        kind = classify_refusal(item["answer"])
         raw = _raw_text(item)
+        kind = classify_refusal(item["answer"] if raw is None else raw)
+        stored_kind = item.get("refusal_kind")
         rows.append(
             {
                 "id": item["id"],
@@ -48,10 +50,16 @@ def rescore(report: dict[str, Any]) -> dict[str, Any]:
                 "kind": kind,
                 "before": kind is RefusalKind.EXACT,
                 "after": kind is not RefusalKind.NONE,
-                # 보고서를 만들 때의 판정과 strict 재계산이 같은가
-                "stored_agrees": item.get("refused") == (kind is RefusalKind.EXACT),
-                # 정규화 전 원문으로 판정해도 같은가 (원문이 없으면 None)
-                "raw_agrees": None if raw is None else classify_refusal(raw) is kind,
+                # 보고서를 만들 때의 판정과 같은가. refusal_kind가 없는 예전 보고서는 그때의
+                # 규칙(EXACT만 거절)과 견준다
+                "stored_kind": stored_kind,
+                "stored_agrees": (
+                    item.get("refused") == (kind is RefusalKind.EXACT)
+                    if stored_kind is None
+                    else stored_kind == kind.value
+                ),
+                # 정규화된 answer로 판정해도 같은가 (원문이 없으면 None)
+                "raw_agrees": None if raw is None else classify_refusal(item["answer"]) is kind,
                 # 검색이 근거를 하나도 못 가져온 문항인가 (범위 밖 문항은 근거가 없어 None)
                 "retrieval_miss": item.get("recall_at_k") == 0,
                 # 상위 k에 라벨된 근거가 하나라도 있는가 (eval.run._record와 같은 규칙)
@@ -147,10 +155,20 @@ def format_rescore(name: str, result: dict[str, Any]) -> str:
         f"NONE {len(kinds[RefusalKind.NONE])}",
     ]
     stored_differs = [r for r in rows if not r["stored_agrees"]]
-    lines.append(
-        f"- 보고서의 `refused`와 strict 재계산이 다른 문항: {len(stored_differs)}"
-        + (f" ({_ids(stored_differs)})" if stored_differs else "")
-    )
+    if any(r["stored_kind"] is not None for r in rows):
+        changes = ", ".join(
+            f"{r['id'].rsplit('-', 1)[-1]} {r['stored_kind']}→{r['kind'].value}"
+            for r in stored_differs
+        )
+        lines.append(
+            f"- 보고서에 저장된 판정(`refusal_kind`)과 지금 규칙의 판정이 다른 문항: "
+            f"{len(stored_differs)}" + (f" ({changes})" if changes else "")
+        )
+    else:
+        lines.append(
+            f"- 보고서의 `refused`와 strict 재계산이 다른 문항: {len(stored_differs)}"
+            + (f" ({_ids(stored_differs)})" if stored_differs else "")
+        )
     with_raw = [r for r in rows if r["raw_agrees"] is not None]
     raw_differs = [r for r in with_raw if not r["raw_agrees"]]
     lines.append(
