@@ -481,3 +481,34 @@ def test_key_fails_closed_when_its_role_is_removed(settings):
         ):
             assert r.status_code == 401 and r.json() == UNAUTHORIZED
             assert INTERNAL_MARK not in r.text
+
+
+# ---- 문구를 바꿔 말한 거절 (M-2 Task 20) ----
+
+PARAPHRASED_REFUSAL = (
+    "제공된 자료로는 신용카드 연회비를 확인할 수 없습니다. "
+    "[1]에는 예금 보호 한도만 명시되어 있으며, 연회비 정보는 포함되어 있지 않습니다."
+)
+
+
+def test_chat_paraphrased_refusal_is_normalized_and_adds_no_field(settings):
+    with open_client(settings, FakeLLM(PARAPHRASED_REFUSAL)) as client:
+        setup_indexed(client)
+        body = chat(client, make_key(client)["key"], question="신용카드 연회비는?").json()
+    # 모양은 그대로: 최상위 키와 axb 안의 키가 늘지 않는다
+    assert set(body) == {"id", "object", "created", "model", "choices", "usage", "axb"}
+    assert set(body["axb"]) == {"refused", "citations", "passages", "model", "latency_ms"}
+    assert body["choices"][0]["message"]["content"] == REFUSAL_TEXT  # 출처 목록도 붙지 않는다
+    assert body["axb"]["refused"] is True
+    assert body["axb"]["citations"] == [] and body["axb"]["passages"] == []
+
+
+def test_v1_ask_paraphrased_refusal_is_normalized_and_adds_no_field(settings):
+    with open_client(settings, FakeLLM(PARAPHRASED_REFUSAL)) as client:
+        setup_indexed(client)
+        key = make_key(client)["key"]
+        r = client.post("/v1/ask", json={"question": "신용카드 연회비는?"}, headers=bearer(key))
+    body = r.json()
+    assert r.status_code == 200
+    assert set(body) == {"answer", "citations", "refused", "latency_ms", "passages", "model"}
+    assert body["refused"] is True and body["answer"] == REFUSAL_TEXT and body["citations"] == []

@@ -29,6 +29,7 @@ from axbuilder.corpus import CorpusSource, load_sources, source_file
 from axbuilder.eval.dataset import Evidence, GoldItem, QType, load_golden, validate_golden
 from axbuilder.eval.metrics import (
     citation_precision,
+    grounded_refusal_correct,
     matches,
     recall_at_k,
     reciprocal_rank,
@@ -36,6 +37,7 @@ from axbuilder.eval.metrics import (
 )
 from axbuilder.generation.answer import answer
 from axbuilder.generation.llm import LLMClient, LLMUnavailableError, get_llm
+from axbuilder.generation.refusal import RefusalKind
 from axbuilder.ingest.chunking import chunk_document
 from axbuilder.ingest.loaders import load_document
 from axbuilder.models import Answer, Chunk, ScoredChunk
@@ -74,6 +76,13 @@ class EvalReport(BaseModel):
     mrr: float
     citation_precision: float | None  # 인용이 하나라도 있는 문항의 평균. LLM 없이는 None
     refusal_accuracy: float | None  # LLM 없이는 None
+    # 정해진 문구(EXACT)만 거절로 센 값 = v0.2.0까지의 규칙. 예전 보고서에는 없어 기본값을 둔다
+    refusal_accuracy_strict: float | None = None
+    # 근거가 상위 k에 있으면 답변, 없으면 거절이 정답인 지표와 그 내역 (grounded_refusal_correct)
+    grounded_refusal_accuracy: float | None = None
+    over_refusals: int | None = None  # 근거가 있는데 거절
+    grounded_refusals: int | None = None  # 근거가 없어서 거절 (범위 밖 포함)
+    ungrounded_answers: int | None = None  # 근거가 없는데 답함 (환각 위험 신호)
     by_qtype: dict[str, dict[str, float]]  # qtype → {"n", 지표...} (잴 수 없는 지표는 빠짐)
     items: list[dict]  # 문항별 기록: 검색 결과·적중 여부·답변·지연 (실패 사례 분석용)
     # 계획의 Interfaces에 없는 필드: 색인·평가 시간과 질문당 지연(초·밀리초). 결과라 config와 나눈다
@@ -145,6 +154,11 @@ def run_eval(
         mrr=overall["mrr"],
         citation_precision=overall.get("citation_precision"),
         refusal_accuracy=overall.get("refusal_accuracy"),
+        refusal_accuracy_strict=overall.get("refusal_accuracy_strict"),
+        grounded_refusal_accuracy=overall.get("grounded_refusal_accuracy"),
+        over_refusals=overall.get("over_refusals"),
+        grounded_refusals=overall.get("grounded_refusals"),
+        ungrounded_answers=overall.get("ungrounded_answers"),
         by_qtype=by_qtype,
         items=records,
         timing={
@@ -193,6 +207,8 @@ def _record(
         "latency_ms": latency_ms,
     }
     if result is not None:
+        # 근거가 둘인 문항에서 하나만 들어와도 "있음". 범위 밖 문항은 근거가 없어 늘 False
+        evidence_in_context = bool(record["recall_at_k"])
         record.update(
             {
                 "refused": result.refused,
@@ -201,6 +217,16 @@ def _record(
                 "citation_precision": citation_precision(result.citations, item.evidence),
                 "answer": result.text,
                 "llm": None if result.llm is None else result.llm.model_dump(),
+                "refusal_kind": result.refusal_kind.value,
+                "refusal_correct_strict": refusal_correct(
+                    result.refusal_kind is RefusalKind.EXACT, item.qtype
+                ),
+                # 정규화 전 모델 출력. 바꿔 말한 거절도 answer는 정해진 문구라 원문은 여기서 본다
+                "raw_answer": None if result.llm is None else result.llm.text,
+                "evidence_in_context": evidence_in_context,
+                "grounded_refusal_correct": grounded_refusal_correct(
+                    result.refused, evidence_in_context
+                ),
             }
         )
     return record
@@ -212,6 +238,14 @@ _SUMMARY_KEYS = {
     "mrr": "reciprocal_rank",
     "citation_precision": "citation_precision",
     "refusal_accuracy": "refusal_correct",
+    "refusal_accuracy_strict": "refusal_correct_strict",
+    "grounded_refusal_accuracy": "grounded_refusal_correct",
+}
+# 근거 기준 거절 지표의 내역: 이름 → (근거가 상위 k에 있는가, 거절했는가)
+_REFUSAL_COUNTS = {
+    "over_refusals": (True, True),
+    "grounded_refusals": (False, True),
+    "ungrounded_answers": (False, False),
 }
 
 
@@ -226,6 +260,10 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, float]:
         values = [float(r[key]) for r in records if r.get(key) is not None]
         if values:
             summary[name] = math.fsum(values) / len(values)
+    answered = [r for r in records if r.get("evidence_in_context") is not None]
+    if answered:
+        for name, case in _REFUSAL_COUNTS.items():
+            summary[name] = sum((r["evidence_in_context"], r["refused"]) == case for r in answered)
     return summary
 
 
@@ -273,6 +311,8 @@ def format_markdown(report: EvalReport) -> str:
             ("인용 n", "citation_precision", True),
             ("인용 정밀도", "citation_precision", False),
             ("거절 정확도", "refusal_accuracy", False),
+            ("거절 정확도(문구 일치만)", "refusal_accuracy_strict", False),
+            ("근거 기준 거절 정확도", "grounded_refusal_accuracy", False),
         ]
     columns = ["구분", "n", *(column for column, _, _ in layout)]
 
@@ -315,6 +355,13 @@ def format_markdown(report: EvalReport) -> str:
         "|" + "|".join("---" for _ in columns) + "|",
         *rows,
     ]
+    if report.over_refusals is not None:
+        lines += [
+            "",
+            f"근거가 있는데 거절 {report.over_refusals} · 근거가 없어서 거절 "
+            f"{report.grounded_refusals} · 근거가 없는데 답함 {report.ungrounded_answers} "
+            f"(근거 = 상위 {k}개에 라벨된 근거가 하나라도 있음)",
+        ]
     details = [
         f"{key}={config[key]}"
         for key in (
