@@ -33,7 +33,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 
 from axbuilder.api.keys import KeyRecord, KeyStore
-from axbuilder.workspace import WorkspaceStore
+from axbuilder.workspace import WorkspaceNotFoundError, WorkspaceStore
 
 logger = logging.getLogger(__name__)
 
@@ -160,14 +160,27 @@ class AccessRules:
         self.cors_origins = frozenset(cors_origins)
 
     def _still_bound(self, record: KeyRecord) -> bool:
-        """키가 가리키는 워크스페이스와 역할이 지금도 있는가. 읽을 수 없으면 False(fail-closed).
+        """키가 가리키는 워크스페이스와 역할이 지금도 있는가.
 
         본문 검증이나 경로 탐색보다 먼저 확인한다: 역할이 없어진 키는 없는 키와 똑같이 401이어야
         하고, 400·404로 "키는 살아 있다"는 것을 알려 주면 안 된다.
+
+        워크스페이스가 없거나 설정 파일의 내용이 틀렸으면 False(fail-closed). 파일을 잠깐 읽지
+        못한 것(OSError: 다른 스레드가 바꿔 끼우는 중 등)은 그대로 던진다. 그것을 "키 무효"로
+        보면 유효한 키에 401이 나가고, 클라이언트는 키가 폐기된 줄 알고 버린다.
         """
         try:
             workspace = self.store.get(record.workspace_id)
-        except Exception:  # 없음, 깨진 설정 파일, 읽기 오류
+        except WorkspaceNotFoundError:
+            logger.warning(
+                "key %s points to workspace %s, which no longer exists",
+                record.key_id,
+                record.workspace_id,
+            )
+            return False
+        except OSError:
+            raise
+        except Exception:  # 깨진 설정 파일(YAML·검증 오류)
             logger.warning(
                 "key %s points to workspace %s, which cannot be read",
                 record.key_id,
@@ -233,8 +246,23 @@ class AccessRules:
         match = _BEARER.fullmatch(authorization) if authorization is not None else None
         record = self.keys.authenticate(match.group(1) if match else None)
         # 설정 파일을 읽으므로 이벤트 루프 밖에서 한다
-        if record is not None and not await run_in_threadpool(self._still_bound, record):
-            record = None
+        if record is not None:
+            try:
+                bound = await run_in_threadpool(self._still_bound, record)
+            except OSError:
+                # 다시 해 봐도 설정 파일을 읽지 못했다. 키가 틀린 것이 아니므로 401이 아니다
+                logger.warning("could not read the workspace of key %s", record.key_id)
+                response = openai_error(
+                    503,
+                    "잠시 후 다시 시도하세요",
+                    "temporarily_unavailable",
+                    {"Retry-After": "1"},
+                )
+                response.headers.update(cors)
+                await response(scope, receive, send)
+                return
+            if not bound:
+                record = None
         if record is None:
             response = _unauthorized_response()
             response.headers.update(cors)

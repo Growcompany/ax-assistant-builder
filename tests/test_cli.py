@@ -264,3 +264,62 @@ def test_browser_failure_does_not_crash_the_server_thread(monkeypatch):
         thread = cli.open_browser_when_ready("http://127.0.0.1", port, timeout=5, interval=0.02)
         thread.join(5)
     assert not thread.is_alive()
+
+
+# ---- PR #20 리뷰: 안내하는 주소가 실제로 열리는 주소여야 한다 ----
+
+
+def test_serve_on_ipv6_loopback_uses_a_bracketed_url(served, monkeypatch, capsys):
+    monkeypatch.setattr(cli, "_address_exists", lambda host: True)
+    monkeypatch.setattr(cli, "_port_is_free", lambda host, port: True)
+    assert cli.main(["serve", "--host", "::1", "--port", "8123"]) == 0
+    assert served["browser"] == [("http://[::1]:8123", 8123)]
+    out = capsys.readouterr().out
+    assert "화면: http://[::1]:8123" in out and "http://127.0.0.1" not in out
+
+
+@pytest.mark.parametrize(
+    ("host", "url"), [("0.0.0.0", "http://127.0.0.1:8123"), ("::", "http://[::1]:8123")]
+)
+def test_serve_on_all_addresses_opens_the_loopback_url(served, monkeypatch, capsys, host, url):
+    monkeypatch.setattr(cli, "_address_exists", lambda host: True)
+    monkeypatch.setattr(cli, "_port_is_free", lambda host, port: True)
+    assert cli.main(["serve", "--host", host, "--port", "8123"]) == 0
+    assert served["browser"] == [(url, 8123)]
+    assert f"화면: {url}" in capsys.readouterr().out
+
+
+def test_serve_on_a_lan_address_says_the_ui_cannot_be_opened(served, monkeypatch, capsys):
+    # 서버가 192.168.0.10에서만 들으면 127.0.0.1로는 붙을 수 없고, 그 IP로 붙으면 loopback이
+    # 아니라서 화면이 403이다. 열리지 않는 주소를 안내하거나 브라우저로 열지 않는다
+    monkeypatch.setattr(cli, "_address_exists", lambda host: True)
+    monkeypatch.setattr(cli, "_port_is_free", lambda host, port: True)
+    assert cli.main(["serve", "--host", "192.168.0.10", "--port", "8123"]) == 0
+    assert served["browser"] == []
+    out = capsys.readouterr().out
+    assert "화면: 열 수 없습니다" in out and "--host 0.0.0.0" in out
+    assert "http://127.0.0.1:8123" not in out and "http://192.168.0.10" not in out
+    assert "/v1/*" in out and "AXB_ALLOWED_HOSTS" in out
+    assert len(served["run"]) == 1  # /v1/* 용으로 서버는 뜬다
+
+
+def test_serve_on_an_address_this_pc_does_not_have(served, capsys):
+    assert cli.main(["serve", "--host", "203.0.113.9", "--port", str(free_port())]) == 1
+    captured = capsys.readouterr()
+    assert "이 PC에 없는 주소" in captured.err and "203.0.113.9" in captured.err
+    assert served["run"] == []
+
+
+def test_browser_probe_uses_the_given_host(monkeypatch):
+    seen = []
+
+    def fake_connect(address, timeout=None):
+        seen.append(address)
+        raise OSError("not yet")
+
+    monkeypatch.setattr(cli.socket, "create_connection", fake_connect)
+    monkeypatch.setattr(cli.webbrowser, "open", lambda url: None)
+    cli.open_browser_when_ready(
+        "http://[::1]:8123", 8123, timeout=0.1, interval=0.01, host="::1"
+    ).join(5)
+    assert seen and set(seen) == {("::1", 8123)}

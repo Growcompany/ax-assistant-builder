@@ -18,7 +18,6 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import re
 import secrets
 import threading
@@ -30,6 +29,7 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from axbuilder import fsutil
 from axbuilder.workspace import WorkspaceStore, is_valid_workspace_id
 
 logger = logging.getLogger(__name__)
@@ -144,7 +144,10 @@ class KeyStore:
             self._by_workspace[entry.name] = records
             self._written_at[entry.name] = started
 
-    def _write_locked(self, workspace_id: str) -> None:
+    def _write_locked(self, workspace_id: str, records: list[KeyRecord] | None = None) -> None:
+        """records(없으면 지금 메모리의 목록)를 파일에 쓴다. 실패하면 예외, 파일은 그대로다."""
+        if records is None:
+            records = self._by_workspace.get(workspace_id, [])
         directory = self._store.path(workspace_id)
         if not directory.is_dir():  # 워크스페이스가 지워졌다
             return
@@ -159,14 +162,14 @@ class KeyStore:
                     "created_at": record.created_at,
                     "last_used_at": self._last_used.get((workspace_id, record.key_id)),
                 }
-                for record in self._by_workspace.get(workspace_id, [])
+                for record in records
             ]
         }
         path = directory / KEYS_FILE
         temp = path.with_name(f".{KEYS_FILE}.{uuid.uuid4().hex}.tmp")
         try:
             temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            os.replace(temp, path)
+            fsutil.replace(temp, path)
         finally:
             temp.unlink(missing_ok=True)
         self._dirty.discard(workspace_id)
@@ -192,15 +195,13 @@ class KeyStore:
         )
         with self._lock:
             self._check_readable(workspace_id)
-            records = self._by_workspace.setdefault(workspace_id, [])
+            records = self._by_workspace.get(workspace_id, [])
             if len(records) >= MAX_KEYS_PER_WORKSPACE:
                 raise TooManyKeysError(workspace_id)
-            records.append(record)
-            try:
-                self._write_locked(workspace_id)
-            except BaseException:
-                records.remove(record)  # 저장하지 못한 키는 쓸 수 없게
-                raise
+            # 파일에 먼저 쓰고, 성공한 뒤에만 메모리에 넣는다. 쓰지 못하면 예외가 나가고 원문은
+            # 아무에게도 가지 않는다(저장되지 않은 키를 사용자가 받아 쓰는 일이 없다)
+            self._write_locked(workspace_id, [*records, record])
+            self._by_workspace[workspace_id] = [*records, record]
             self._by_hash[record.key_hash] = record
         logger.info("issued key %s for %s (role %s)", record.key_id, workspace_id, role)
         return record, raw
@@ -221,11 +222,14 @@ class KeyStore:
             record = next((r for r in records if r.key_id == key_id), None)
             if record is None:
                 return False
-            # 메모리에서 먼저 뺀다: 파일을 쓰다 실패해도 이 프로세스에서는 바로 못 쓴다
+            # 파일에서 먼저 지우고, 성공한 뒤에만 메모리에서 뺀다. 순서가 반대면 쓰기가 실패했을
+            # 때 키가 목록에서는 사라지고(다시 폐기할 수 없다) 파일에는 남아, 다시 켜면 되살아난다.
+            # 쓰지 못하면 폐기 자체가 실패한다: 키는 목록에 그대로 있고 다시 폐기할 수 있다
+            remaining = [r for r in records if r is not record]
+            self._write_locked(workspace_id, remaining)
+            self._by_workspace[workspace_id] = remaining
             self._by_hash.pop(record.key_hash, None)
-            records.remove(record)
             self._last_used.pop((workspace_id, key_id), None)
-            self._write_locked(workspace_id)
         logger.info("revoked key %s of %s", key_id, workspace_id)
         return True
 

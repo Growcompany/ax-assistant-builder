@@ -36,7 +36,7 @@ from axbuilder.settings import Settings
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CSP = (
     "default-src 'self'; img-src 'self' data:; object-src 'none'; "
-    "base-uri 'none'; frame-ancestors 'none'"
+    "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 )
 DEMO_SOURCE = """\
 - doc_id: {doc_id}
@@ -550,11 +550,13 @@ def test_static_and_root_reject_foreign_host(client):
         assert r.status_code == 403
 
 
-def test_api_and_docs_responses_have_no_csp(client):
-    # Swagger(/docs)는 CDN 스크립트를 쓴다. CSP를 붙이면 깨지므로 화면 경로에만 붙인다
-    for path in ("/docs", "/health", "/workspaces"):
+def test_api_responses_do_not_get_the_ui_policy(client):
+    # 화면용 CSP는 화면 경로에만. JSON 응답에는 더 좁은 정책이 붙는다(test_review_round1.py)
+    for path in ("/health", "/workspaces"):
         r = client.get(path)
-        assert r.status_code == 200 and "content-security-policy" not in r.headers
+        assert r.status_code == 200
+        assert r.headers["content-security-policy"] == "default-src 'none'; frame-ancestors 'none'"
+    assert client.get("/docs").status_code == 404  # Swagger는 기본으로 꺼져 있다(AXB_API_DOCS)
 
 
 def test_static_files_are_package_data():

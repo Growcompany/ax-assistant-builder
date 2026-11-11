@@ -18,6 +18,7 @@ ENV_VARS = {
     "embed_model": "AXB_EMBED_MODEL",
     "allowed_hosts": "AXB_ALLOWED_HOSTS",
     "cors_origins": "AXB_CORS_ORIGINS",
+    "api_docs": "AXB_API_DOCS",
 }
 
 DEFAULT_ALLOWED_HOSTS = ("127.0.0.1", "localhost", "[::1]")
@@ -45,6 +46,9 @@ class Settings(BaseModel):
     # /v1/* 응답에 CORS 머리글을 달아 줄 출처(브라우저에서 직접 부르는 페이지). 환경변수는 쉼표로
     # 구분한다. 기본은 빈 값(꺼짐). 정확히 일치하는 출처에만 달고 와일드카드는 없다
     cors_origins: tuple[str, ...] = ()
+    # /docs(Swagger)·/redoc을 켠다. 기본은 끔: 그 화면은 외부 CDN의 스크립트를 불러오고, 그
+    # 안의 버튼으로 관리 API가 실행된다. 개발할 때만 켠다(true/false)
+    api_docs: bool = False
 
     @field_validator("cors_origins", mode="before")
     @classmethod

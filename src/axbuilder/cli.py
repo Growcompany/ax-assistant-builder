@@ -101,6 +101,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     return handler(args)
 
 
+def _local_host(host: str) -> str | None:
+    """이 PC에서 화면을 열 때 쓸 주소. 서버가 loopback에서 듣지 않으면 None."""
+    address = ipaddress.ip_address(host)
+    if address.is_loopback:
+        return host
+    if address.is_unspecified:  # 0.0.0.0, :: 는 loopback에서도 듣는다
+        return "::1" if address.version == 6 else HOST
+    return None
+
+
+def _url(host: str, port: int) -> str:
+    return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
+
+
+def _address_exists(host: str) -> bool:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    with socket.socket(family, socket.SOCK_STREAM) as probe:
+        try:
+            probe.bind((host, 0))
+        except OSError:
+            return False
+    return True
+
+
 def _port_is_free(host: str, port: int) -> bool:
     # uvicorn은 포트를 못 잡으면 로그 여러 줄을 남기고 끝난다. 먼저 확인해 한 줄로 알린다
     family = socket.AF_INET6 if ":" in host else socket.AF_INET
@@ -132,7 +156,11 @@ def _report_llm(settings: Settings) -> None:
 
 
 def open_browser_when_ready(
-    url: str, port: int, timeout: float = BROWSER_WAIT_SECONDS, interval: float = 0.2
+    url: str,
+    port: int,
+    timeout: float = BROWSER_WAIT_SECONDS,
+    interval: float = 0.2,
+    host: str = HOST,
 ) -> threading.Thread:
     """서버가 port에서 연결을 받기 시작하면 브라우저로 url을 연다. 기다리는 스레드를 돌려준다.
 
@@ -143,7 +171,7 @@ def open_browser_when_ready(
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
-                socket.create_connection((HOST, port), timeout=interval).close()
+                socket.create_connection((host, port), timeout=interval).close()
             except OSError:
                 time.sleep(interval)
                 continue
@@ -170,6 +198,9 @@ def _serve(args: argparse.Namespace) -> int:
     except ValueError as e:  # 쓸 수 없는 AXB_* 값
         print(f"설정 오류: {e}", file=sys.stderr)
         return 2
+    if not _address_exists(args.host):
+        print(f"이 PC에 없는 주소입니다: {args.host}", file=sys.stderr)
+        return 1
     if not _port_is_free(args.host, args.port):
         print(
             f"포트 {args.port}을 이미 다른 프로그램이 쓰고 있습니다. 다른 포트로 실행하세요: "
@@ -177,17 +208,27 @@ def _serve(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    url = f"http://{HOST}:{args.port}"
+    local_host = _local_host(args.host)
+    url = None if local_host is None else _url(local_host, args.port)
     _report_llm(settings)
-    print(f"화면: {url}  (끝내려면 Ctrl+C)")
+    if url is not None:
+        print(f"화면: {url}  (끝내려면 Ctrl+C)")
+    else:
+        # 화면과 관리 API는 loopback에서 온 요청만 받는다. 이 PC에서 자기 IP로 붙어도 상대 주소는
+        # 그 IP라서 loopback이 아니다
+        print(
+            f"화면: 열 수 없습니다. 서버가 {args.host}에서만 듣는데, 화면과 관리 API는 이 PC의 "
+            "loopback 주소(127.0.0.1)로 온 요청만 받습니다. 화면도 쓰려면 --host 0.0.0.0 으로 "
+            "띄우세요  (끝내려면 Ctrl+C)"
+        )
     if not ipaddress.ip_address(args.host).is_loopback:
         print(
             f"다른 PC에서 붙을 수 있게 {args.host}에 띄웁니다. 밖에서는 API 키로 /v1/* 만 쓸 수 "
             "있고 화면과 관리 API는 이 PC에서만 열립니다. 이 PC의 이름·IP를 AXB_ALLOWED_HOSTS에 "
             "넣어야 밖에서 붙을 수 있습니다"
         )
-    if not args.no_browser:
-        open_browser_when_ready(url, args.port)
+    if url is not None and not args.no_browser:
+        open_browser_when_ready(url, args.port, host=local_host)
     # uvicorn은 기본으로 FORWARDED_ALLOW_IPS 환경변수(없으면 127.0.0.1)에서 온 요청의
     # X-Forwarded-For를 믿어 클라이언트 주소를 바꾼다. 환경변수가 "*"면 밖에서 온 요청이 머리글
     # 하나로 이 PC인 척할 수 있으므로(관리 API가 열린다) 값을 고정한다. loopback만 믿으면 주소가

@@ -84,7 +84,7 @@ class ChatRequest(BaseModel):
 
     model: str
     messages: list[_Message]
-    stream: StrictBool = False
+    stream: StrictBool | None = False  # OpenAI 규격은 boolean | null. null은 false다
 
 
 class V1AskRequest(BaseModel):

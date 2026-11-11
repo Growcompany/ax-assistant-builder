@@ -297,7 +297,10 @@ def test_cross_site_browser_requests_are_rejected(client, settings):
     # 사이트는 포트를 보지 않아 다른 포트의 로컬 페이지(localhost:3000)는 same-site다. 이것도 막는다
     same_site = {"Sec-Fetch-Site": "same-site"}
     assert client.post("/workspaces/bank/index", headers=same_site).status_code == 403
-    assert client.get("/health", headers=cross).status_code == 200  # 읽기는 그대로
+    # PR #20 리뷰: 다른 사이트가 보낸 GET도 받지 않는다(핸들러가 돌고 상태 코드로 정보가 샌다).
+    # Sec-Fetch-Site가 없는 클라이언트(curl·httpx)의 읽기는 그대로다
+    assert client.get("/health", headers=cross).status_code == 403
+    assert client.get("/health").status_code == 200
     assert files_under(settings.data_dir) == {"workspaces/bank/workspace.yaml"}
 
 

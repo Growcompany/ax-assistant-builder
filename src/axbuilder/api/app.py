@@ -31,7 +31,7 @@ LLM은 워크스페이스마다 고를 수 있다(workspace.yaml의 llm_model, �
   _RejectCrossSite     다른 출처의 Origin, cross-site 상태 변경 요청은 403. 유효한 키가 있는
                        /v1/* 요청은 건너뛴다(키가 인증이다)
   _BodySizeLimit       본문 상한
-  _UISecurityHeaders   화면 응답의 CSP 등
+  (가장 바깥) _SecurityHeaders  모든 응답에 nosniff·프레임 차단·CSP·CORP
 이 PC에서 온 요청의 역할은 요청이 정하고(/workspaces/{id}/ask), 키로 온 요청의 역할은 키가 정한다
 (/v1/*, axbuilder.api.v1).
 """
@@ -75,8 +75,15 @@ from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
+from axbuilder import fsutil
 from axbuilder.api import v1
-from axbuilder.api.access import KEY_SCOPE, AccessRules, is_v1_scope, openai_error
+from axbuilder.api.access import (
+    KEY_SCOPE,
+    AccessRules,
+    is_v1_scope,
+    openai_error,
+    route_path,
+)
 from axbuilder.api.keys import KeyStore
 from axbuilder.corpus import DOC_ID, load_sources, source_file
 from axbuilder.generation.answer import answer
@@ -140,10 +147,16 @@ INDEX_INFO = "index.json"
 STATIC_DIR = Path(__file__).parent / "static"  # 화면 파일 (패키지 데이터)
 # 화면 응답에 붙인다. 인라인 스크립트·스타일과 외부 출처를 막아, 문서 제목이나 답변의 글자가
 # 혹시 마크업으로 들어가도 실행되지 않게 한다
+# form-action: 화면에 끼어든 마크업이 양식을 다른 곳으로 보내지 못하게 한다
 CONTENT_SECURITY_POLICY = (
     "default-src 'self'; img-src 'self' data:; object-src 'none'; "
-    "base-uri 'none'; frame-ancestors 'none'"
+    "base-uri 'none'; frame-ancestors 'none'; form-action 'self'"
 )
+# 화면이 아닌 응답(JSON 등): 브라우저가 문서로 열더라도 아무것도 불러오지 못하고 프레임에 못 든다
+API_CONTENT_SECURITY_POLICY = "default-src 'none'; frame-ancestors 'none'"
+# /docs·/redoc(AXB_API_DOCS로 켰을 때): Swagger가 CDN의 스크립트를 쓰므로 프레임만 막는다
+DOCS_CONTENT_SECURITY_POLICY = "frame-ancestors 'none'"
+DOCS_PATHS = frozenset({"/docs", "/redoc", "/docs/oauth2-redirect"})
 # 예시 워크스페이스(POST /demo-workspace): 서버를 띄운 폴더 기준의 출처 목록에서 저장소에 있는
 # 가상 문서(path 항목)만 등록한다
 DEMO_SOURCES = Path("corpus") / "bank" / "sources.yaml"
@@ -398,8 +411,11 @@ def _chunk_order(chunk: Chunk) -> tuple[str, int, str]:
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     """임시 파일에 쓴 뒤 바꿔 끼운다. 쓰다가 멈춰도 반쯤 쓴 파일이 남지 않는다."""
     temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temp.replace(path)
+    try:
+        temp.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        fsutil.replace(temp, path)  # 잠금 없이 읽는 쪽(목록 조회)과 겹치면 잠깐 다시 해 본다
+    finally:
+        temp.unlink(missing_ok=True)
 
 
 def _copy_limited(source: BinaryIO, target: Path) -> tuple[int, str, bytes, bool]:
@@ -659,7 +675,7 @@ class _Service:
             with self.lock(ws.id):
                 if record_path.exists():  # 같은 doc_id를 동시에 올린 경우
                     raise HTTPException(409, f"문서 '{meta.doc_id}'가 이미 있습니다")
-                temp.replace(documents / f"{meta.doc_id}{suffix}")
+                fsutil.replace(temp, documents / f"{meta.doc_id}{suffix}")
                 _write_json(
                     record_path,
                     {
@@ -678,15 +694,8 @@ class _Service:
         documents = self._documents_dir(workspace_id)
         chunks: list[Chunk] = []
         doc_ids: list[str] = []
-        records = sorted(documents.glob("*.json")) if documents.is_dir() else []
-        for record_path in records:
-            record = json.loads(record_path.read_text(encoding="utf-8"))
-            meta = DocMeta.model_validate(record["meta"])
-            suffix = record["suffix"]
-            # 기록 파일이 가리키는 경로도 doc_id·확장자로 다시 만든다(기록을 경로로 믿지 않는다)
-            if meta.doc_id != record_path.stem or suffix not in SUPPORTED_SUFFIXES:
-                raise ValueError(f"inconsistent document record {record_path.name}")
-            path = documents / f"{meta.doc_id}{suffix}"
+        for meta, record in self._load_records(workspace_id):
+            path = documents / f"{meta.doc_id}{record['suffix']}"
             chunks.extend(self._parse(path, meta, workspace_id))
             doc_ids.append(meta.doc_id)
         chunks.sort(key=_chunk_order)
@@ -705,12 +714,12 @@ class _Service:
         도중에는 잠깐 "none"으로 보일 수 있다.
         """
         try:
-            raw = (self._index_dir(workspace_id) / INDEX_INFO).read_text(encoding="utf-8")
+            info = json.loads(fsutil.read_text(self._index_dir(workspace_id) / INDEX_INFO))
         except FileNotFoundError:
             return IndexStatus(state="none", chunks=None), set()
-        try:
-            info = json.loads(raw)
-        except ValueError:
+        except (OSError, ValueError):
+            # 읽을 수 없거나 JSON·UTF-8이 아니다: 손상이면 stale(다시 색인). 워크스페이스 하나의
+            # 깨진 파일이 목록 전체를 500으로 만들지 않는다
             info = None
         if not isinstance(info, dict):
             info = {}
@@ -726,20 +735,46 @@ class _Service:
         ready = known and indexed == doc_ids and info.get("embedder") == self._embedder_name
         return IndexStatus(state="ready" if ready else "stale", chunks=chunks), indexed
 
+    def _load_records(self, workspace_id: str) -> list[tuple[DocMeta, dict[str, Any]]]:
+        """문서 기록(documents/*.json)을 읽는다 → (메타, 기록) 목록, doc_id 오름차순.
+
+        내용이 깨졌거나 앞뒤가 맞지 않는 기록은 서버 로그에 남기고 건너뛴다. 목록·상세·색인이 모두
+        이 함수를 써서 같은 문서 집합을 본다: 기록 하나가 깨져도 워크스페이스를 열고, 나머지
+        문서로 색인하고 질문할 수 있다. 건너뛴 문서는 색인에 들어가지 않는다.
+        """
+        records = []
+        for record_path in self._document_records(workspace_id):
+            try:
+                record = json.loads(fsutil.read_text(record_path))
+                meta = DocMeta.model_validate(record["meta"])
+                size = record["bytes"]
+                # 기록이 가리키는 파일 경로는 doc_id·확장자로 다시 만든다(기록을 경로로 믿지 않는다)
+                if (
+                    meta.doc_id != record_path.stem
+                    or record["suffix"] not in SUPPORTED_SUFFIXES
+                    or not isinstance(size, int)
+                    or isinstance(size, bool)
+                    or size < 0
+                ):
+                    raise ValueError("inconsistent document record")
+            except (ValueError, KeyError, TypeError):  # JSON·UTF-8·검증 오류는 ValueError다
+                logger.error(
+                    "skipping unreadable document record %s of workspace %s",
+                    record_path.name,
+                    workspace_id,
+                )
+                continue
+            records.append((meta, record))
+        records.sort(key=lambda item: item[0].doc_id)
+        return records
+
     def summary(self, ws: Workspace) -> WorkspaceSummary:
-        doc_ids = {record.stem for record in self._document_records(ws.id)}
+        doc_ids = {meta.doc_id for meta, _ in self._load_records(ws.id)}
         status, _ = self._index_status(ws.id, doc_ids)
         return WorkspaceSummary(**ws.model_dump(), documents=len(doc_ids), index=status)
 
     def detail(self, ws: Workspace) -> WorkspaceDetail:
-        records = []
-        for record_path in self._document_records(ws.id):
-            record = json.loads(record_path.read_text(encoding="utf-8"))
-            meta = DocMeta.model_validate(record["meta"])
-            if meta.doc_id != record_path.stem:
-                raise ValueError(f"inconsistent document record {record_path.name}")
-            records.append((meta, record))
-        records.sort(key=lambda item: item[0].doc_id)
+        records = self._load_records(ws.id)
         status, indexed = self._index_status(ws.id, {meta.doc_id for meta, _ in records})
         # 저장 정보(sha256, 올린 시각)는 화면에 필요 없어 내보내지 않는다
         documents = [
@@ -839,7 +874,7 @@ class _Service:
                 # - 임베딩에서 실패(GPU 메모리 부족 등): 점도 정보 파일도 그대로라 이전 색인으로
                 #   계속 답한다
                 # - 점을 바꾸는 도중 실패하거나 서버가 꺼짐: 정보 파일이 없어 "색인 없음"(409)
-                dense.build(chunks, before_replace=lambda: info_path.unlink(missing_ok=True))
+                dense.build(chunks, before_replace=lambda: fsutil.unlink(info_path))
                 _write_json(
                     info_path,
                     {
@@ -1006,29 +1041,49 @@ class _BodySizeLimit:
         await self.app(scope, limited_receive, send)
 
 
-class _UISecurityHeaders:
-    """화면 응답(GET /, /static/…)에 CSP와 nosniff를 붙인다. 404 같은 오류 응답에도 붙는다.
+class _SecurityHeaders:
+    """모든 응답에 붙이는 머리글. 가장 바깥에 둔다: 안쪽 미들웨어의 401·403에도 붙는다.
 
-    /docs(Swagger)는 CDN의 스크립트를 쓰므로 CSP를 붙이지 않는다. API의 JSON 응답도 그대로 둔다.
-    Cache-Control: no-cache는 "쓰기 전에 서버에 확인"이다(ETag로 304). 서버를 새 판으로 바꿨는데
-    브라우저가 예전 화면 스크립트를 계속 쓰는 일을 막는다.
+    - X-Content-Type-Options: nosniff — JSON을 다른 사이트의 <script>가 스크립트로 읽지 못한다
+    - X-Frame-Options: DENY, CSP frame-ancestors 'none' — 다른 사이트의 프레임 안에 뜨지 않는다
+      (프레임 안의 클릭으로 관리 API를 실행하는 클릭재킹)
+    - Cross-Origin-Resource-Policy: same-origin — 다른 사이트의 <script>·<img>가 응답을 받지 못해
+      onload/onerror로 "그 주소가 있는지"도 알 수 없다. /v1/* 가 허용한 CORS 출처에 답할 때만
+      cross-origin이다
+    - CSP: 화면은 CONTENT_SECURITY_POLICY, /docs·/redoc은 프레임 차단만, 그 밖(JSON)은
+      default-src 'none'
+    - 화면의 Cache-Control: no-cache는 "쓰기 전에 서버에 확인"이다(ETag로 304). 서버를 새 판으로
+      바꿨는데 브라우저가 예전 화면 스크립트를 계속 쓰는 일을 막는다
     """
 
     def __init__(self, app: Any) -> None:
         self.app = app
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        path = scope["path"] if scope["type"] == "http" else ""
-        if path != "/" and path != "/static" and not path.startswith("/static/"):
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+        path = route_path(scope)
+        ui = path == "/" or path == "/static" or path.startswith("/static/")
+        if ui:
+            policy = CONTENT_SECURITY_POLICY
+        elif path in DOCS_PATHS:
+            policy = DOCS_CONTENT_SECURITY_POLICY
+        else:
+            policy = API_CONTENT_SECURITY_POLICY
 
         async def send_with_headers(message: Any) -> None:
             if message["type"] == "http.response.start":
                 headers = MutableHeaders(scope=message)
-                headers["Content-Security-Policy"] = CONTENT_SECURITY_POLICY
                 headers["X-Content-Type-Options"] = "nosniff"
-                headers["Cache-Control"] = "no-cache"
+                headers["X-Frame-Options"] = "DENY"
+                headers["Content-Security-Policy"] = policy
+                shared = "access-control-allow-origin" in headers  # AccessRules가 허용한 출처
+                headers["Cross-Origin-Resource-Policy"] = (
+                    "cross-origin" if shared else "same-origin"
+                )
+                if ui:
+                    headers["Cache-Control"] = "no-cache"
             await send(message)
 
         await self.app(scope, receive, send_with_headers)
@@ -1047,6 +1102,10 @@ class _RejectCrossSite:
     Sec-Fetch-Site를 보내지 않는 구형 브라우저 대비다. 호스트만 본다(포트는 보지 않는다): 다른
     포트의 로컬 페이지는 최신 브라우저에서 Sec-Fetch-Site(same-site)로 막힌다.
 
+    GET도 막는다: Sec-Fetch-Site가 cross-site·same-site인 GET은 다른 사이트의 <script>·<img>·
+    fetch·프레임이 보낸 것이다. 응답을 읽지 못하더라도 핸들러가 돌고(/models는 Ollama를 부른다)
+    상태 코드로 정보가 샌다. 다른 사이트의 링크를 눌러 화면(/)을 여는 최상위 탐색만 받는다.
+
     유효한 API 키로 온 /v1/* 요청(AccessRules가 scope에 표시)은 두 검사를 건너뛴다. 키는 페이지
     스크립트가 훔쳐 쓸 수 없는 인증이고(쿠키처럼 브라우저가 알아서 붙이지 않는다), 다른 출처의
     페이지에서 쓰라고 만든 길이다.
@@ -1062,13 +1121,15 @@ class _RejectCrossSite:
             if origins and not _header_host_allowed(_ORIGIN_HEADER, origins, self.allowed_hosts):
                 await _reject_host_or_origin(scope, receive, send)
                 return
-        if (
-            scope["type"] == "http"
-            and scope.get(KEY_SCOPE) is None
-            and scope["method"] not in ("GET", "HEAD", "OPTIONS")
-        ):
-            site = dict(scope["headers"]).get(b"sec-fetch-site")
-            if site not in _ALLOWED_FETCH_SITES:
+        if scope["type"] == "http" and scope.get(KEY_SCOPE) is None:
+            headers = dict(scope["headers"])
+            if headers.get(b"sec-fetch-site") not in _ALLOWED_FETCH_SITES and not (
+                # 다른 사이트의 링크로 화면을 여는 것: 최상위 탐색(프레임이 아님)으로 "/"만
+                scope["method"] in ("GET", "HEAD")
+                and route_path(scope) == "/"
+                and headers.get(b"sec-fetch-mode") == b"navigate"
+                and headers.get(b"sec-fetch-dest") == b"document"
+            ):
                 response = JSONResponse(
                     status_code=403,
                     content={"detail": "다른 사이트에서 보낸 요청은 받지 않습니다"},
@@ -1163,9 +1224,15 @@ def create_app(
         finally:
             service.close()
 
-    app = FastAPI(title="AX Assistant Builder", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(
+        title="AX Assistant Builder",
+        version="0.1.0",
+        lifespan=lifespan,
+        # Swagger·ReDoc 화면은 기본으로 끈다(Settings.api_docs). /openapi.json은 남는다
+        docs_url="/docs" if settings.api_docs else None,
+        redoc_url="/redoc" if settings.api_docs else None,
+    )
     app.state.service = service
-    app.add_middleware(_UISecurityHeaders)
     app.add_middleware(
         _BodySizeLimit,
         upload_bytes=MAX_UPLOAD_BYTES + UPLOAD_OVERHEAD_BYTES,
@@ -1182,6 +1249,7 @@ def create_app(
         cors_origins=settings.cors_origins,
     )
     app.add_middleware(_RejectForeignHost, allowed_hosts=settings.allowed_hosts)
+    app.add_middleware(_SecurityHeaders)  # 가장 바깥: 위의 거절 응답에도 붙는다
 
     def error(
         request: Request, status_code: int, detail: str, code: str, v1_detail: str | None = None
@@ -1220,7 +1288,13 @@ def create_app(
         # 스택 트레이스·내부 경로는 서버 로그에만 남기고 응답에는 넣지 않는다
         logger.error("unhandled error on %s %s", request.method, request.url.path, exc_info=exc)
         detail = "서버 내부 오류가 발생했습니다. 서버 로그를 확인하세요"
-        return error(request, 500, detail, "internal_error")
+        response = error(request, 500, detail, "internal_error")
+        # 이 핸들러는 모든 미들웨어의 바깥(ServerErrorMiddleware)에서 돈다: 머리글을 직접 단다
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = API_CONTENT_SECURITY_POLICY
+        response.headers["Cross-Origin-Resource-Policy"] = "same-origin"
+        return response
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(request: Request, exc: StarletteHTTPException) -> Response:

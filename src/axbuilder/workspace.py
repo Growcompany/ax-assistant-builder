@@ -1,6 +1,5 @@
 """워크스페이스(회사 하나) 설정과 저장 위치. 모든 데이터는 root/{id}/ 아래에 둔다."""
 
-import os
 import re
 import uuid
 from pathlib import Path
@@ -8,6 +7,8 @@ from typing import Literal
 
 import yaml
 from pydantic import BaseModel, field_validator
+
+from axbuilder import fsutil
 
 # 워크스페이스 id는 폴더 이름이 된다. 허용 문자를 좁혀 "../etc" 같은 경로 조작을 막는다
 WORKSPACE_ID = re.compile(r"[a-z0-9-]{2,32}")
@@ -94,7 +95,8 @@ class WorkspaceStore:
     def get(self, workspace_id: str) -> Workspace:
         config = self.path(workspace_id) / CONFIG_NAME
         try:
-            text = config.read_text(encoding="utf-8")
+            # 화면의 목록 조회는 잠금 없이 읽는다: 설정 저장과 겹치면 잠깐 다시 해 본다
+            text = fsutil.read_text(config)
         except FileNotFoundError as e:
             raise WorkspaceNotFoundError(f"workspace {workspace_id!r} not found") from e
         ws = Workspace.model_validate(yaml.safe_load(text))
@@ -112,7 +114,7 @@ class WorkspaceStore:
         try:
             with temp.open("w", encoding="utf-8") as f:
                 yaml.safe_dump(ws.model_dump(mode="json"), f, allow_unicode=True, sort_keys=False)
-            os.replace(temp, config)
+            fsutil.replace(temp, config)
         finally:
             temp.unlink(missing_ok=True)
         return ws
