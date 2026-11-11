@@ -4,14 +4,15 @@
 import { closeEvidence, openEvidence } from "../actions.js";
 import { $, badge, h, icon, replace, roleTag } from "../dom.js";
 import { docTypeLabel } from "../format.js";
-import { documentOf, findRecord, on, state } from "../state.js";
+import { documentOf, findRecord, hasPages, on, state } from "../state.js";
 
 let returnTo = null; // 패널을 닫으면 포커스를 돌려줄 인용 칩
 
 export function citationLabel(citation) {
   const parts = [];
   if (citation.article) parts.push(String(citation.article));
-  if (typeof citation.page === "number") parts.push(`${citation.page}쪽`);
+  // 쪽 번호는 PDF에서만 뜻이 있다(txt·md·hwpx는 늘 1쪽으로 온다)
+  if (typeof citation.page === "number" && hasPages(citation.doc_id)) parts.push(`${citation.page}쪽`);
   return parts.join(", ");
 }
 

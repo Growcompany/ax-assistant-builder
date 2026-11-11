@@ -1,7 +1,7 @@
 // 질문 탭: 역할 선택, 질문 기록(질문·답변·근거 목록), 입력창.
 // 기록은 말풍선이 아니라 "누가(어떤 역할로) 물었고 어디에 근거했는가"를 적는 대장 한 줄이다.
 
-import { ask, buildIndex, loadWorkspaces, openEvidence, setTab } from "../actions.js";
+import { ask, buildIndex, cancelAsk, loadWorkspaces, openEvidence, setTab } from "../actions.js";
 import { renderAnswer } from "../answer.js";
 import { badge, errorNotice, h, icon, replace, roleTag, setFieldError } from "../dom.js";
 import { describeError } from "../errors.js";
@@ -291,7 +291,12 @@ export function createAskView(workspaceId) {
       h(
         "div",
         { class: "record-foot" },
-        latency ? h("span", { class: "latency", text: `응답 ${latency}` }) : null,
+        h(
+          "span",
+          { class: "answer-meta" },
+          latency ? h("span", { class: "latency", text: `응답 ${latency}` }) : null,
+          response.model ? h("span", { class: "answer-model" }, "모델 ", h("span", { class: "tag", text: response.model })) : null,
+        ),
         reaskButtons(record),
       ),
     );
@@ -328,12 +333,37 @@ export function createAskView(workspaceId) {
         `${record.role} 역할이 볼 수 있는 문서에서 근거를 찾아 답을 쓰는 중입니다. 경과 `,
         h("span", { class: "elapsed", data: { since: record.startedAt }, text: "0초" }),
       ),
+      h(
+        "div",
+        null,
+        h("button", { class: "btn cancel-button", type: "button", on: { click: () => cancelAsk(record) } }, icon("close"), "질문 취소"),
+      ),
+    );
+  }
+
+  function cancelledBody(record) {
+    return h(
+      "div",
+      { class: "cancelled" },
+      h("p", { class: "cancelled-title", text: "질문을 취소했습니다" }),
+      h("p", { class: "notice-text", text: "화면은 답을 기다리지 않습니다. 서버가 이미 쓰기 시작한 답은 끝날 때까지 계속될 수 있습니다." }),
+      h(
+        "div",
+        null,
+        h(
+          "button",
+          { class: "btn retry-button", type: "button", disabled: Boolean(state.asking[workspaceId]), on: { click: () => submit(record.question, record.role, record) } },
+          icon("refresh"),
+          "다시 묻기",
+        ),
+      ),
     );
   }
 
   function renderRecord(record) {
     let body;
     if (record.status === "done") body = answerBody(record);
+    else if (record.status === "cancelled") body = cancelledBody(record);
     else if (record.status === "error") body = errorBody(record);
     else body = pendingBody(record);
     return h(
@@ -352,9 +382,12 @@ export function createAskView(workspaceId) {
   function putRecord(record) {
     const next = renderRecord(record);
     const previous = elements.get(record.id);
+    const hadFocus = Boolean(previous) && previous.contains(document.activeElement);
     if (previous && previous.parentNode === records) previous.replaceWith(next);
     else records.appendChild(next);
     elements.set(record.id, next);
+    // 취소·다시 시도 버튼을 누르면 그 기록이 통째로 바뀐다. 포커스를 잃지 않게 기록으로 옮긴다
+    if (hadFocus) (next.querySelector(".cancel-button, .retry-button") || next).focus();
     return next;
   }
 

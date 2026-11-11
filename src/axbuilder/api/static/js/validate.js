@@ -68,13 +68,3 @@ export function checkFile(file) {
   if (file.size > MAX_UPLOAD_BYTES) return "파일이 50MB를 넘습니다. 나눠서 올리세요.";
   return null;
 }
-
-// 파일 이름에서 문서 id를 제안한다. 한글 이름처럼 남는 글자가 없으면 빈 문자열.
-export function suggestDocId(filename) {
-  return stemOf(filename)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 64)
-    .replace(/-+$/, "");
-}

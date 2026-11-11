@@ -67,14 +67,6 @@ async function refreshAfterChange(id) {
   else await loadWorkspaces();
 }
 
-export async function createWorkspace(workspace) {
-  const created = await api.createWorkspace(workspace);
-  await loadWorkspaces();
-  state.tab = "documents"; // 새 워크스페이스는 문서 올리기가 다음 할 일
-  await selectWorkspace(created && created.id ? created.id : workspace.id);
-  announce(`워크스페이스 ${workspace.name}을 만들었습니다. 문서를 올리세요.`);
-}
-
 // 예시 은행 워크스페이스. 이미 있으면(409) 있는 것을 연다.
 export async function loadDemo() {
   if (demoPending) return;
@@ -103,10 +95,35 @@ export function isDemoPending() {
   return demoPending;
 }
 
-export async function uploadDocument(id, form) {
-  const result = await api.uploadDocument(id, form);
-  await refreshAfterChange(id);
-  return result;
+// 설치된 모델 목록(Ollama 상태 포함)을 다시 읽는다.
+export async function loadModels() {
+  if (state.modelsLoading) return;
+  state.modelsLoading = true;
+  emit("models");
+  try {
+    state.models = await api.models();
+    state.modelsError = null;
+  } catch (error) {
+    state.modelsError = error;
+  }
+  state.modelsLoading = false;
+  emit("models");
+}
+
+// 워크스페이스가 답할 때 쓸 모델을 바꾼다. null은 서버 기본 모델. 실패하면 예외(화면이 되돌린다).
+export async function setModel(id, llmModel) {
+  const summary = await api.setModel(id, llmModel);
+  const value = summary && "llm_model" in summary ? summary.llm_model : llmModel;
+  if (state.currentId === id && state.detail) state.detail = { ...state.detail, llm_model: value };
+  state.workspaces = state.workspaces.map((workspace) =>
+    workspace.id === id ? { ...workspace, llm_model: value } : workspace,
+  );
+  emit("detail");
+  emit("workspaces");
+}
+
+export function cancelAsk(record) {
+  if (record && record.status === "pending" && record.abort) record.abort.abort();
 }
 
 export async function buildIndex(id) {
@@ -142,23 +159,26 @@ export async function ask(id, question, role, retryRecord) {
   record.startedAt = Date.now();
   record.error = null;
   record.response = null;
+  record.abort = new AbortController();
   if (!retryRecord) conversation(id).push(record);
   state.asking[id] = true;
   emit("conversation", { record, added: !retryRecord });
   try {
-    const response = await api.ask(id, record.question, record.role);
+    const response = await api.ask(id, record.question, record.role, record.abort.signal);
     record.response = {
       answer: String((response && response.answer) || ""),
       citations: Array.isArray(response && response.citations) ? response.citations : [],
       passages: Array.isArray(response && response.passages) ? response.passages : [],
       refused: Boolean(response && response.refused),
       latency_ms: response ? response.latency_ms : null,
+      model: response && typeof response.model === "string" ? response.model : "",
     };
     record.status = "done";
   } catch (error) {
     record.error = error;
-    record.status = "error";
+    record.status = error && error.aborted ? "cancelled" : "error";
   }
+  record.abort = null;
   state.asking[id] = false;
   emit("conversation", { record, added: false });
   if (record.status === "done") {
@@ -168,6 +188,8 @@ export async function ask(id, question, role, retryRecord) {
         ? "답변이 도착했습니다. 근거가 없어 답하지 않았습니다."
         : `답변이 도착했습니다. 근거 ${count}건.`,
     );
+  } else if (record.status === "cancelled") {
+    announce("질문을 취소했습니다.");
   } else {
     announce("답변을 받지 못했습니다.");
     // 색인·역할·워크스페이스 상태가 화면과 달라졌을 수 있다
@@ -201,11 +223,12 @@ export async function checkServer() {
     next = "down";
   }
   if (next !== state.server) {
-    const recovered = state.server === "down" && next === "up";
     state.server = next;
     emit("server");
-    // 서버가 다시 켜졌으면 못 받았던 목록·상세를 다시 받아 본다
-    if (recovered && state.listError) await loadWorkspaces();
-    else if (recovered && state.detailError) await refreshDetail();
+  }
+  // 서버에 닿지 못해 못 받았던 목록·상세는 서버가 답하는 것을 확인하면 다시 받아 본다
+  if (next === "up") {
+    if (state.listError && state.listError.status === 0) await loadWorkspaces();
+    else if (state.detailError && state.detailError.status === 0) await refreshDetail();
   }
 }

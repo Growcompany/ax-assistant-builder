@@ -77,6 +77,15 @@ const BY_CONTEXT = {
     },
   },
   load: { 404: WORKSPACE_GONE },
+  model: {
+    404: WORKSPACE_GONE,
+    422: { message: "모델 이름이 형식에 맞지 않습니다.", hint: "목록에서 다시 고르세요." },
+  },
+  keys: {
+    404: { message: "워크스페이스나 키를 찾을 수 없습니다.", hint: "목록을 다시 불러오세요." },
+    409: { message: "이 워크스페이스에 만들 수 있는 키 수를 넘었습니다.", hint: "쓰지 않는 키를 폐기한 뒤 다시 만드세요." },
+    422: { message: "키 이름과 역할을 확인하세요.", hint: "" },
+  },
 };
 
 function fieldMessage(field, item) {
@@ -132,6 +141,16 @@ export function describeError(error, context) {
   const known = (BY_CONTEXT[context] || {})[status] ||
     BY_STATUS[status] || { message: `요청이 실패했습니다(상태 코드 ${status}).`, hint: "" };
   const detail = error.detail;
+  // 모델이 설치되어 있지 않은 503: 서버 설명에 "ollama pull <이름>"이 들어 있다
+  if (status === 503 && typeof detail === "string" && detail.includes("ollama pull ")) {
+    return {
+      message: "답을 쓸 모델이 Ollama에 설치되어 있지 않습니다.",
+      hint: "터미널에서 아래 명령으로 모델을 받은 뒤 다시 시도하세요. 화면 위의 '답하는 모델'에서 설치된 다른 모델로 바꿔도 됩니다.",
+      detail,
+      fields: {},
+      action: "retry",
+    };
+  }
   return {
     message: known.message,
     hint: known.hint || "",

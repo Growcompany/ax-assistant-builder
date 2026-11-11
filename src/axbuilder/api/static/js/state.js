@@ -16,6 +16,9 @@ export const state = {
   indexError: {}, // 워크스페이스 id -> ApiError
   evidence: null, // { recordId, index } 근거 패널에 열린 인용
   server: "unknown", // unknown | up | down
+  models: null, // GET /models 결과 { available, default, models, hint }
+  modelsError: null,
+  modelsLoading: false,
 };
 
 const listeners = new Map();
@@ -92,4 +95,31 @@ export function documentOf(docId) {
   const documents = state.detail ? state.detail.documents_list || [] : [];
   const found = documents.find((doc) => doc.doc_id === docId);
   return found || null;
+}
+
+// 문서 id -> 쪽 번호가 뜻이 있는 문서인가. txt·md·hwpx는 쪽이 없어 늘 1이라 보여 주지 않는다.
+export function hasPages(docId) {
+  const doc = documentOf(docId);
+  return Boolean(doc) && String(doc.extension || "").replace(/^\./, "").toLowerCase() === "pdf";
+}
+
+// 모델 목록 해석. cloud 모드는 "목록은 읽혔고 안내가 있는데 모델이 기본 모델 하나뿐"인 경우다
+// (로컬에서 기본 모델이 설치돼 있으면 서버가 안내를 주지 않는다).
+export function modelStatus() {
+  const list = state.models;
+  if (!list) return { known: false, cloud: false, available: false, models: [], fallback: "", hint: "", defaultInstalled: false };
+  const models = Array.isArray(list.models) ? list.models : [];
+  const fallback = String(list.default || "");
+  const hint = typeof list.hint === "string" ? list.hint : "";
+  const cloud = Boolean(list.available) && Boolean(hint) && models.length === 1 && models[0].name === fallback;
+  const listed = models.some((model) => model.name === fallback || model.name === `${fallback}:latest`);
+  return {
+    known: true,
+    cloud,
+    available: Boolean(list.available),
+    models,
+    fallback,
+    hint,
+    defaultInstalled: Boolean(list.available) && (cloud || !hint || listed),
+  };
 }

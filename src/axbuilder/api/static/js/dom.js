@@ -1,5 +1,7 @@
 // DOM을 만드는 작은 도우미. 글자는 언제나 텍스트 노드로 들어간다(마크업으로 해석되지 않는다).
 
+import { splitCommand } from "./naming.js";
+
 const BOOLEAN_PROPS = new Set(["disabled", "hidden", "checked", "required", "open", "readOnly"]);
 
 function append(node, children) {
@@ -68,8 +70,60 @@ export function setFieldError(input, errorNode, message) {
   }
 }
 
+async function writeClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (error) {
+    // 권한이 없거나 오래된 브라우저: 보이지 않는 입력을 골라 복사한다
+    const holder = h("textarea", { class: "sr-only", readOnly: true, "aria-hidden": "true", tabindex: "-1" });
+    holder.value = text;
+    document.body.appendChild(holder);
+    holder.select();
+    let copied = false;
+    try {
+      copied = document.execCommand("copy");
+    } catch (inner) {
+      copied = false;
+    }
+    holder.remove();
+    return copied;
+  }
+}
+
+// 복사 단추. getText는 누르는 순간의 글자를 돌려준다(키처럼 화면에 두지 않는 값도 복사할 수 있게).
+export function copyButton(getText, label = "복사") {
+  const text = h("span", { text: label });
+  const button = h("button", { class: "btn copy-button", type: "button" }, icon("copy"), text);
+  let timer = 0;
+  button.addEventListener("click", async () => {
+    const copied = await writeClipboard(String(getText()));
+    text.textContent = copied ? "복사됨" : "복사 실패";
+    button.classList.toggle("is-copied", copied);
+    announce(copied ? "복사했습니다." : "복사하지 못했습니다. 글자를 직접 골라 복사하세요.");
+    window.clearTimeout(timer);
+    timer = window.setTimeout(() => {
+      text.textContent = label;
+      button.classList.remove("is-copied");
+    }, 1800);
+  });
+  return button;
+}
+
+// 터미널 명령 한 줄과 복사 단추.
+export function commandBox(command) {
+  return h(
+    "div",
+    { class: "command" },
+    h("code", { class: "command-text", text: command }),
+    copyButton(() => command, "명령 복사"),
+  );
+}
+
 // 오류 설명(describeError 결과)을 영역 안의 문장 묶음으로 만든다.
+// 서버 설명에 "ollama pull …" 같은 명령이 있으면 복사할 수 있게 따로 보여 준다.
 export function errorNotice(info, ...actions) {
+  const command = splitCommand(info.detail).command;
   return h(
     "div",
     { class: "notice notice-error", role: "alert" },
@@ -80,6 +134,7 @@ export function errorNotice(info, ...actions) {
       h("p", { class: "notice-title", text: info.message }),
       info.hint ? h("p", { class: "notice-text", text: info.hint }) : null,
       info.detail ? h("p", { class: "notice-detail", text: `서버가 보낸 설명: ${info.detail}` }) : null,
+      command ? commandBox(command) : null,
       actions.some(Boolean) ? h("div", { class: "notice-actions" }, actions) : null,
     ),
   );

@@ -3,7 +3,7 @@
 import { isDemoPending, loadDemo, loadWorkspaces, selectWorkspace } from "../actions.js";
 import { $, h, icon, replace } from "../dom.js";
 import { describeError } from "../errors.js";
-import { on, prefs, state } from "../state.js";
+import { modelStatus, on, prefs, state } from "../state.js";
 
 const INDEX_LABELS = { none: "색인 없음", ready: "색인 최신", stale: "다시 색인 필요" };
 
@@ -118,6 +118,33 @@ function renderServer() {
   };
   $("server").dataset.state = state.server;
   $("server-text").textContent = texts[state.server];
+  renderModelStatus();
+}
+
+// Ollama 연결과 기본 모델. 서버가 꺼져 있으면 알 수 없다.
+function renderModelStatus() {
+  const status = modelStatus();
+  const ollama = $("ollama");
+  const model = $("default-model");
+  const set = (node, textNode, stateName, text) => {
+    node.dataset.state = stateName;
+    textNode.textContent = text;
+  };
+  if (state.server === "down" || !status.known) {
+    const text = state.server === "down" ? "알 수 없음" : "확인 중";
+    set(ollama, $("ollama-text"), "unknown", `Ollama ${text}`);
+    set(model, $("default-model-text"), "unknown", `기본 모델 ${text}`);
+    return;
+  }
+  if (status.cloud) {
+    set(ollama, $("ollama-text"), "up", "클라우드 모드(Claude)");
+    set(model, $("default-model-text"), "up", `모델 ${status.fallback}`);
+    return;
+  }
+  set(ollama, $("ollama-text"), status.available ? "up" : "down", status.available ? "Ollama 연결됨" : "Ollama 꺼짐");
+  if (!status.available) set(model, $("default-model-text"), "unknown", `기본 모델 ${status.fallback}`);
+  else if (status.defaultInstalled) set(model, $("default-model-text"), "up", `기본 모델 ${status.fallback}`);
+  else set(model, $("default-model-text"), "down", `기본 모델 ${status.fallback} 없음`);
 }
 
 function effectiveTheme() {
@@ -174,6 +201,7 @@ export function mountSidebar(openNewWorkspace) {
   on("index", renderList);
   on("demo", renderList);
   on("server", renderServer);
+  on("models", renderModelStatus);
   renderList();
   renderServer();
   renderThemeToggle();

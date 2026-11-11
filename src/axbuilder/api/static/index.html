@@ -33,16 +33,26 @@
 
       <div class="side-actions">
         <button class="btn btn-block" id="open-new-workspace" type="button">
-          <span class="icon icon-plus" aria-hidden="true"></span>새 워크스페이스
+          <span class="icon icon-plus" aria-hidden="true"></span>새 어시스턴트 만들기
         </button>
         <button class="btn btn-quiet btn-block" id="side-demo" type="button" hidden>예시 은행 불러오기</button>
       </div>
 
       <div class="side-foot">
-        <p class="server" id="server" data-state="unknown">
-          <span class="server-mark" aria-hidden="true"></span>
-          <span id="server-text">서버 확인 중</span>
-        </p>
+        <ul class="status-list" id="status-list" aria-label="연결 상태">
+          <li class="server" id="server" data-state="unknown">
+            <span class="server-mark" aria-hidden="true"></span>
+            <span id="server-text">서버 확인 중</span>
+          </li>
+          <li class="server" id="ollama" data-state="unknown">
+            <span class="server-mark" aria-hidden="true"></span>
+            <span id="ollama-text">Ollama 확인 중</span>
+          </li>
+          <li class="server" id="default-model" data-state="unknown">
+            <span class="server-mark" aria-hidden="true"></span>
+            <span id="default-model-text">기본 모델 확인 중</span>
+          </li>
+        </ul>
         <button class="btn btn-quiet btn-icon" id="theme-toggle" type="button" aria-label="어두운 화면으로 바꾸기">
           <span class="icon icon-moon" aria-hidden="true"></span>
         </button>
@@ -66,56 +76,122 @@
 
   <div class="sr-only" id="live" role="status" aria-live="polite"></div>
 
-  <dialog class="dialog" id="new-workspace" aria-labelledby="nw-title">
-    <form class="dialog-form" id="nw-form" method="dialog" novalidate>
+  <dialog class="dialog wizard" id="quick-create" aria-labelledby="qc-title">
+    <form class="dialog-form" id="qc-form" novalidate>
       <header class="dialog-head">
-        <h2 id="nw-title">새 워크스페이스</h2>
-        <button class="btn btn-quiet btn-icon" id="nw-close" type="button" aria-label="닫기">
+        <h2 id="qc-title">어시스턴트 만들기</h2>
+        <button class="btn btn-quiet btn-icon" id="qc-close" type="button" aria-label="닫기">
           <span class="icon icon-close" aria-hidden="true"></span>
         </button>
       </header>
 
-      <div class="dialog-body">
-        <p class="dialog-lead">회사 하나가 워크스페이스 하나입니다. 역할마다 볼 수 있는 문서 등급을 정하면, 질문할 때 그 역할이 볼 수 있는 문서에서만 답을 찾습니다.</p>
+      <ol class="rail" id="qc-rail" aria-label="만드는 순서">
+        <li><button class="rail-step" type="button" data-step="1">
+          <span class="rail-number" aria-hidden="true">1</span>
+          <span class="rail-text"><span class="rail-label">이름</span><span class="rail-note">어시스턴트의 이름을 정합니다</span></span>
+        </button></li>
+        <li><button class="rail-step" type="button" data-step="2">
+          <span class="rail-number" aria-hidden="true">2</span>
+          <span class="rail-text"><span class="rail-label">모델</span><span class="rail-note">답을 쓸 로컬 모델을 고릅니다</span></span>
+        </button></li>
+        <li><button class="rail-step" type="button" data-step="3">
+          <span class="rail-number" aria-hidden="true">3</span>
+          <span class="rail-text"><span class="rail-label">파일</span><span class="rail-note">문서를 올리고 색인합니다. 수십 초에서 몇 분</span></span>
+        </button></li>
+      </ol>
 
-        <div class="field">
-          <label for="nw-id">워크스페이스 id</label>
-          <input id="nw-id" name="id" type="text" autocomplete="off" spellcheck="false" maxlength="32" aria-describedby="nw-id-hint nw-id-error">
-          <p class="field-hint" id="nw-id-hint">소문자·숫자·하이픈(-) 2~32자. 주소와 저장 폴더 이름이 되며 나중에 바꿀 수 없습니다.</p>
-          <p class="field-error" id="nw-id-error" hidden></p>
-        </div>
-
-        <div class="field-row">
+      <div class="dialog-body" id="qc-body">
+        <section class="wizard-step" id="qc-step-1" aria-labelledby="qc-h1">
+          <h3 class="wizard-heading" id="qc-h1" tabindex="-1">어떤 어시스턴트인가요?</h3>
           <div class="field">
-            <label for="nw-name">이름</label>
-            <input id="nw-name" name="name" type="text" autocomplete="off" maxlength="100" aria-describedby="nw-name-error">
-            <p class="field-error" id="nw-name-error" hidden></p>
+            <label for="qc-name">이름</label>
+            <input id="qc-name" type="text" autocomplete="off" maxlength="100" placeholder="예: 우리 회사 규정 어시스턴트" aria-describedby="qc-name-error">
+            <p class="field-error" id="qc-name-error" hidden></p>
           </div>
           <div class="field">
-            <label for="nw-industry">업종 <span class="optional">선택</span></label>
-            <input id="nw-industry" name="industry" type="text" autocomplete="off" maxlength="50" placeholder="예: finance" aria-describedby="nw-industry-error">
-            <p class="field-error" id="nw-industry-error" hidden></p>
+            <label for="qc-id">영문 id</label>
+            <input id="qc-id" type="text" autocomplete="off" spellcheck="false" maxlength="32" aria-describedby="qc-id-hint qc-id-error">
+            <p class="field-hint" id="qc-id-hint">이름에서 자동으로 제안합니다. 소문자·숫자·하이픈(-) 2~32자이고, 주소와 저장 폴더 이름이 되어 나중에 바꿀 수 없습니다.</p>
+            <p class="field-error" id="qc-id-error" hidden></p>
           </div>
-        </div>
+          <details class="advanced" id="qc-advanced">
+            <summary>세부 설정: 업종과 역할</summary>
+            <div class="advanced-body">
+              <div class="field">
+                <label for="qc-industry">업종 <span class="optional">선택</span></label>
+                <input id="qc-industry" type="text" autocomplete="off" maxlength="50" placeholder="예: finance" aria-describedby="qc-industry-error">
+                <p class="field-error" id="qc-industry-error" hidden></p>
+              </div>
+              <fieldset class="roles-field" aria-describedby="qc-roles-hint qc-roles-error">
+                <legend>역할과 볼 수 있는 문서 등급</legend>
+                <p class="field-hint" id="qc-roles-hint">기본은 모든 문서를 보는 관리자 하나입니다. 역할을 더하면 질문할 때 그 역할이 볼 수 있는 등급의 문서에서만 답을 찾습니다. public은 누구나 보는 문서, internal은 내부 문서입니다.</p>
+                <ul class="role-rows" id="qc-roles"></ul>
+                <button class="btn btn-quiet" id="qc-add-role" type="button">
+                  <span class="icon icon-plus" aria-hidden="true"></span>역할 추가
+                </button>
+                <p class="field-error" id="qc-roles-error" hidden></p>
+              </fieldset>
+            </div>
+          </details>
+          <div id="qc-error-1"></div>
+        </section>
 
-        <fieldset class="roles-field" aria-describedby="nw-roles-hint nw-roles-error">
-          <legend>역할과 볼 수 있는 문서 등급</legend>
-          <p class="field-hint" id="nw-roles-hint">public은 누구나 볼 수 있는 문서, internal은 내부 문서입니다.</p>
-          <ul class="role-rows" id="nw-roles"></ul>
-          <button class="btn btn-quiet" id="nw-add-role" type="button">
-            <span class="icon icon-plus" aria-hidden="true"></span>역할 추가
-          </button>
-          <p class="field-error" id="nw-roles-error" hidden></p>
-        </fieldset>
+        <section class="wizard-step" id="qc-step-2" aria-labelledby="qc-h2" hidden>
+          <h3 class="wizard-heading" id="qc-h2" tabindex="-1">어떤 모델이 답을 쓸까요?</h3>
+          <p class="wizard-lead">이 PC의 Ollama에 설치된 모델 중에서 고릅니다. 문서와 질문은 이 PC 밖으로 나가지 않습니다. 나중에 바꿀 수 있습니다.</p>
+          <div id="qc-models"></div>
+        </section>
 
-        <div class="notice notice-error" id="nw-error" role="alert" hidden></div>
+        <section class="wizard-step" id="qc-step-3" aria-labelledby="qc-h3" hidden>
+          <h3 class="wizard-heading" id="qc-h3" tabindex="-1">어떤 문서로 답할까요?</h3>
+          <label class="drop" id="qc-drop" for="qc-file">
+            <span class="icon icon-upload" aria-hidden="true"></span>
+            <span class="drop-text">
+              <strong>파일을 여기에 끌어다 놓거나 눌러서 고르세요</strong>
+              <span class="drop-hint">여러 개를 한 번에 넣을 수 있습니다. PDF, HWPX, TXT, MD. 파일 하나에 50MB까지.</span>
+            </span>
+          </label>
+          <input class="drop-input" id="qc-file" type="file" multiple accept=".pdf,.hwpx,.txt,.md">
+          <div id="qc-files"></div>
+        </section>
+
+        <section class="wizard-step" id="qc-run" aria-labelledby="qc-hr" hidden>
+          <h3 class="wizard-heading" id="qc-hr" tabindex="-1">만드는 중입니다</h3>
+          <div id="qc-progress"></div>
+        </section>
       </div>
 
-      <footer class="dialog-foot">
-        <button class="btn" id="nw-cancel" type="button">취소</button>
-        <button class="btn btn-primary" id="nw-submit" type="submit">워크스페이스 만들기</button>
+      <footer class="dialog-foot" id="qc-foot">
+        <p class="wizard-foot-note" id="qc-foot-note"></p>
+        <button class="btn" id="qc-back" type="button">이전</button>
+        <button class="btn btn-primary" id="qc-next" type="submit">다음</button>
       </footer>
     </form>
+  </dialog>
+
+  <dialog class="dialog" id="key-dialog" aria-labelledby="key-title">
+    <div class="dialog-form">
+      <header class="dialog-head">
+        <h2 id="key-title">키를 만들었습니다</h2>
+      </header>
+      <div class="dialog-body">
+        <p class="dialog-lead" id="key-lead"></p>
+        <div class="command key-box">
+          <code class="command-text" id="key-value" tabindex="0" aria-label="키 원문"></code>
+          <span id="key-copy"></span>
+        </div>
+        <div class="notice notice-warn key-warning">
+          <span class="icon icon-alert" aria-hidden="true"></span>
+          <div class="notice-body">
+            <p class="notice-title">닫으면 다시 볼 수 없습니다</p>
+            <p class="notice-text">서버에는 키의 해시만 저장합니다. 지금 복사해 안전한 곳에 두세요. 잃어버리면 폐기하고 새로 만들면 됩니다.</p>
+          </div>
+        </div>
+      </div>
+      <footer class="dialog-foot">
+        <button class="btn btn-primary" id="key-close" type="button">복사했습니다, 닫기</button>
+      </footer>
+    </div>
   </dialog>
 
   <noscript><p class="noscript">이 화면은 자바스크립트가 켜져 있어야 동작합니다.</p></noscript>

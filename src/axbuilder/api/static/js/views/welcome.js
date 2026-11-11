@@ -1,6 +1,7 @@
 // 첫 화면: 워크스페이스가 하나도 없을 때(또는 목록을 못 받았을 때) 다음 할 일을 보여 준다.
 
 import { isDemoPending, loadDemo, loadWorkspaces } from "../actions.js";
+import { modelHintNotice } from "./quick-create.js";
 import { badge, errorNotice, h, icon, replace } from "../dom.js";
 import { describeError } from "../errors.js";
 import { state } from "../state.js";
@@ -34,7 +35,17 @@ function specimen() {
   );
 }
 
-export function renderWelcome(container, openNewWorkspace) {
+let noticeSlot = null;
+
+// Ollama가 꺼져 있거나 모델이 없으면 첫 화면에서 무엇을 해야 하는지 알려 준다.
+export function renderWelcomeNotice() {
+  if (!noticeSlot || !document.contains(noticeSlot)) return;
+  const hadFocus = noticeSlot.contains(document.activeElement);
+  replace(noticeSlot, modelHintNotice("모델이 없어도 어시스턴트를 만들고 문서를 올릴 수는 있습니다. 질문하려면 모델이 있어야 합니다."));
+  if (hadFocus) noticeSlot.querySelector("button")?.focus();
+}
+
+export function renderWelcome(container, openQuickCreate) {
   if (!state.loaded) {
     replace(container, h("p", { class: "boot-note", text: "워크스페이스 목록을 불러오는 중입니다." }));
     return;
@@ -59,9 +70,10 @@ export function renderWelcome(container, openNewWorkspace) {
   const errorSlot = h("div", { class: "welcome-error" });
   const demoButton = h(
     "button",
-    { class: "btn btn-primary btn-large", type: "button" },
+    { class: "btn btn-large", type: "button" },
     "예시 은행 워크스페이스 불러오기",
   );
+  noticeSlot = h("div", { class: "welcome-notice" });
   const progress = h(
     "p",
     { class: "progress-line", hidden: true },
@@ -93,20 +105,23 @@ export function renderWelcome(container, openNewWorkspace) {
       h(
         "div",
         { class: "welcome-actions" },
+        h("button", { class: "btn btn-primary btn-large", type: "button", on: { click: openQuickCreate } }, "어시스턴트 만들기"),
         demoButton,
-        h("button", { class: "btn btn-large", type: "button", on: { click: openNewWorkspace } }, "직접 만들기"),
       ),
+      h("p", { class: "welcome-sub", text: "이름을 정하고, 로컬 모델을 고르고, 파일을 넣으면 됩니다. 예시 은행은 미리 준비된 가상 문서 6개로 바로 써 볼 수 있습니다." }),
       progress,
       errorSlot,
+      noticeSlot,
       h(
         "ol",
         { class: "steps", "aria-label": "쓰는 순서" },
-        h("li", null, h("strong", { text: "워크스페이스" }), " 회사와 역할을 정합니다"),
-        h("li", null, h("strong", { text: "문서" }), " 등급을 골라 올립니다"),
-        h("li", null, h("strong", { text: "색인" }), " 검색할 수 있게 만듭니다"),
-        h("li", null, h("strong", { text: "질문" }), " 역할을 골라 묻습니다"),
+        h("li", null, h("strong", { text: "이름" }), " 어시스턴트의 이름을 정합니다"),
+        h("li", null, h("strong", { text: "모델" }), " 이 PC의 로컬 모델을 고릅니다"),
+        h("li", null, h("strong", { text: "파일" }), " 문서를 넣으면 올리고 색인합니다"),
+        h("li", null, h("strong", { text: "질문" }), " 조항을 인용한 답을 받습니다"),
       ),
       specimen(),
     ),
   );
+  renderWelcomeNotice();
 }
