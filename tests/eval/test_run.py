@@ -1,6 +1,7 @@
 """평가 실행기: run_eval(검색 지표 / LLM 답변 지표)과 CLI 보조 함수."""
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import yaml
 from axbuilder.eval.dataset import Evidence, GoldItem
 from axbuilder.eval.run import (
     EvalReport,
+    build_retriever,
     format_markdown,
     load_corpus_chunks,
     main,
@@ -19,6 +21,8 @@ from axbuilder.eval.run import (
 from axbuilder.generation.answer import REFUSAL_TEXT
 from axbuilder.generation.llm import FakeLLM, LLMResponse, LLMUnavailableError
 from axbuilder.models import Chunk, ScoredChunk
+from axbuilder.retrieval.dense import HashEmbedder
+from axbuilder.retrieval.rerank import RerankerUnavailableError, RerankRetriever
 from axbuilder.workspace import Workspace
 
 ws = Workspace(
@@ -438,3 +442,227 @@ def test_cli_llm_failure_mid_run_saves_no_report(tmp_path, monkeypatch, capsys):
     assert not list(reports.glob("**/*.json"))
     err = capsys.readouterr().err
     assert "LLM unavailable: bank-001 (0/2 scored)" in err and "not reachable" in err
+
+
+# --- 리랭커 (M-2 Task 21) ---
+
+# main()이 보고서 config에 남기는 키와 순서. --reranker none이면 v0.2.0과 같아야 한다
+CONFIG_KEYS_WITHOUT_RERANKER = [
+    "workspace",
+    "role",
+    "access_levels",
+    "k",
+    "with_llm",
+    "golden_items",
+    "retriever",
+    "retriever_params",
+    "embed_model",
+    "llm_mode",
+    "llm_model",
+    "n_docs",
+    "n_chunks",
+    "golden",
+    "golden_sha256",
+    "corpus_sha256",
+    "commit",
+    "started_at",
+]
+TIMING_KEYS = [
+    "load_seconds",
+    "model_load_seconds",
+    "index_seconds",
+    "warmup_seconds",
+    "eval_seconds",
+    "mean_latency_ms",
+    "median_latency_ms",
+    "max_latency_ms",
+    "total_seconds",
+]
+CALLBACK_QUESTION = "콜백 요청은 몇 시간 안에 처리해야 하나요?"
+
+
+class FakeReranker:
+    """뒤에 온 후보일수록 높은 점수(순서를 뒤집는다). 본문이 30자를 넘으면 잘린 것으로 센다."""
+
+    name = "fake/reranker"
+
+    def __init__(self) -> None:
+        self.truncated = 0
+        self.scored = 0
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def score(self, question: str, passages: list[str]) -> list[float]:
+        self.calls.append((question, list(passages)))
+        self.truncated += sum(len(p) > 30 for p in passages)
+        self.scored += len(passages)
+        return [float(i) for i in range(len(passages))]
+
+
+def use_reranker(monkeypatch, reranker) -> list[str]:
+    """main()이 실제 모델 대신 가짜 리랭커를 받게 하고, 요청된 선택지를 기록한다."""
+    requested: list[str] = []
+
+    def fake_make_reranker(key: str):
+        requested.append(key)
+        return reranker
+
+    monkeypatch.setattr("axbuilder.eval.run.make_reranker", fake_make_reranker)
+    return requested
+
+
+def write_two_hit_corpus(root: Path) -> Path:
+    """평가 질문에 BM25가 두 조항을 돌려주고, 예열 질문("예금")에도 한 조항이 걸리는 문서."""
+    corpus = write_corpus(root, with_url_doc=False)
+    (corpus / "internal" / "guide.md").write_text(
+        "제1조(목적) 이 지침은 콜백 응대 원칙을 정한다.\n"
+        "제2조(콜백) 콜백 요청은 4시간 안에 처리한다. 콜백 기록은 상담 이력에 남긴다.\n"
+        "제3조(예금) 예금 상담은 영업시간에 한다.\n",
+        encoding="utf-8",
+    )
+    return corpus
+
+
+def stable(report: EvalReport) -> str:
+    """실행할 때마다 달라지는 값(시각·소요 시간)을 뺀 보고서 JSON."""
+    data = report.model_dump()
+    data["timing"] = list(data["timing"])
+    data["config"]["started_at"] = None
+    for item in data["items"]:
+        item["latency_ms"] = None
+    return json.dumps(data, ensure_ascii=False)
+
+
+def test_cli_reranker_none_leaves_the_report_unchanged(tmp_path, monkeypatch, capsys):
+    corpus = write_corpus(tmp_path, with_url_doc=False)
+    monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path / "data"))
+    requested = use_reranker(monkeypatch, FakeReranker())
+    outputs = []
+    for name, extra in (("default", ()), ("explicit", ("--reranker", "none"))):
+        reports = tmp_path / name
+        assert main(cli_args(corpus, reports, *extra)) == 0
+        (saved,) = (reports / "bank").glob("*.json")
+        assert saved.name.endswith("-bm25.json") and "+" not in saved.name
+        report = EvalReport.model_validate_json(saved.read_text(encoding="utf-8"))
+        head = capsys.readouterr().out.splitlines()[0]
+        outputs.append((stable(report), head))
+        # 리랭커가 없으면 새 필드를 넣지 않는다: 키와 순서가 v0.2.0 보고서와 같다
+        assert list(report.config) == CONFIG_KEYS_WITHOUT_RERANKER
+        assert list(report.timing) == TIMING_KEYS
+        assert report.timing["model_load_seconds"] == 0.0
+        assert head == "### bank · bm25 · k=5 · role=준법감시 (public, internal)"
+    assert outputs[0] == outputs[1]
+    assert requested == []  # 리랭커를 만들지도 않는다
+
+
+def test_cli_with_reranker_wraps_the_retriever_and_records_it(tmp_path, monkeypatch, capsys):
+    corpus = write_two_hit_corpus(tmp_path)
+    monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path / "data"))
+    reranker = FakeReranker()
+    requested = use_reranker(monkeypatch, reranker)
+    reports = tmp_path / "reports"
+    assert main(cli_args(corpus, reports, "--reranker", "kure-nano")) == 0
+    assert requested == ["kure-nano"]
+    (saved,) = (reports / "bank").glob("*.json")
+    assert saved.name.endswith("-bm25+kure-nano-c30.json")
+    report = EvalReport.model_validate_json(saved.read_text(encoding="utf-8"))
+    config = report.config
+    assert list(config) == [
+        *CONFIG_KEYS_WITHOUT_RERANKER,
+        "reranker",
+        "candidates",
+        "rerank_truncated",
+        "rerank_pairs",
+    ]
+    assert list(report.timing) == TIMING_KEYS
+    assert config["retriever"] == "bm25"  # base 검색기 이름은 그대로
+    assert config["reranker"] == "fake/reranker" and config["candidates"] == 30
+    # 호출 3번: 모델 적재 1 + 검색 예열 1 + 문항 1(범위 밖 문항은 검색 지표에서 빠진다)
+    assert [question for question, _ in reranker.calls][2:] == [CALLBACK_QUESTION]
+    assert len(reranker.calls) == 3
+    # 보고서에는 평가 문항에서 넘긴 쌍만 센다(적재·예열 호출 제외). 제2조만 30자를 넘는다
+    assert config["rerank_pairs"] == len(reranker.calls[-1][1]) == 2
+    assert config["rerank_truncated"] == 1
+    assert reranker.scored > config["rerank_pairs"]
+    # 점수는 리랭커 점수이고 순서는 리랭커가 뒤집은 순서다(BM25 1위인 정답 제2조가 2위로)
+    (item,) = report.items
+    assert [r["score"] for r in item["retrieved"]] == [1.0, 0.0]
+    assert item["retrieved"][1]["article"] == "제2조" and item["reciprocal_rank"] == 0.5
+    assert report.timing["model_load_seconds"] > 0.0  # 리랭커 첫 호출(모델 적재) 시간
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == (
+        "### bank · bm25 + fake/reranker (candidates=30) · k=5 · role=준법감시 (public, internal)"
+    )
+    assert "rerank_truncated=1 · rerank_pairs=2" in out
+
+
+def test_cli_candidates_is_the_number_of_passages_the_reranker_gets(tmp_path, monkeypatch):
+    corpus = write_two_hit_corpus(tmp_path)
+    monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path / "data"))
+    reranker = FakeReranker()
+    use_reranker(monkeypatch, reranker)
+    reports = tmp_path / "reports"
+    args = cli_args(corpus, reports, "--reranker", "bge-v2-m3", "--candidates", "1")
+    args[args.index("--k") + 1] = "1"
+    assert main(args) == 0
+    (saved,) = (reports / "bank").glob("*-bm25+bge-v2-m3-c1.json")
+    report = EvalReport.model_validate_json(saved.read_text(encoding="utf-8"))
+    assert report.config["candidates"] == 1 and report.config["rerank_pairs"] == 1
+    assert len(reranker.calls[-1][1]) == 1  # 두 조항이 걸리지만 리랭커는 BM25 1위만 받는다
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (("--candidates", "50"), "--candidates needs --reranker"),
+        (("--reranker", "kure-nano", "--candidates", "0"), "--candidates must be >= 1"),
+    ],
+)
+def test_cli_rejects_bad_candidates(tmp_path, monkeypatch, capsys, extra, message):
+    corpus = write_corpus(tmp_path, with_url_doc=False)
+    monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path / "data"))
+    requested = use_reranker(monkeypatch, FakeReranker())
+    with pytest.raises(SystemExit) as exc:
+        main(cli_args(corpus, tmp_path / "reports", *extra))
+    assert exc.value.code == 2 and message in capsys.readouterr().err
+    assert requested == []
+
+
+def test_cli_reranker_unavailable_saves_no_report(tmp_path, monkeypatch, capsys):
+    # Review Focus 5: 모델을 못 불러오면 읽을 수 있는 오류로 끝난다
+    class BrokenReranker(FakeReranker):
+        def score(self, question: str, passages: list[str]) -> list[float]:
+            raise RerankerUnavailableError("cannot load reranker model x/y: OSError: no such model")
+
+    corpus = write_corpus(tmp_path, with_url_doc=False)
+    monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path / "data"))
+    use_reranker(monkeypatch, BrokenReranker())
+    reports = tmp_path / "reports"
+    assert main(cli_args(corpus, reports, "--reranker", "kure-nano")) == 1
+    assert not list(reports.glob("**/*.json"))
+    assert "reranker unavailable: cannot load reranker model x/y" in capsys.readouterr().err
+
+
+def test_latency_includes_reranking(fake_retriever):
+    class SlowReranker(FakeReranker):
+        def score(self, question: str, passages: list[str]) -> list[float]:
+            time.sleep(0.03)
+            return super().score(question, passages)
+
+    retriever = RerankRetriever(fake_retriever, SlowReranker())
+    report = run_eval(items_with_one_oos, retriever, k=5, llm=None, workspace=ws, role="준법감시")
+    assert all(item["latency_ms"] >= 25 for item in report.items)  # 타이머 오차 여유
+    assert report.timing["mean_latency_ms"] >= 25
+
+
+def test_build_retriever_hybrid_fetches_at_least_min_candidates(monkeypatch):
+    # 리랭커에 50개를 넘기려면 hybrid가 BM25·dense에서 50개씩 받아 합쳐야 한다
+    monkeypatch.setattr(
+        "axbuilder.retrieval.dense.SentenceTransformerEmbedder", lambda model_name: HashEmbedder()
+    )
+    chunks = [law1, law2, prod]
+    default, params, _ = build_retriever("hybrid", chunks, "fake-embedder")
+    assert default.candidates == params["candidates"] == 30
+    wider, params, _ = build_retriever("hybrid", chunks, "fake-embedder", min_candidates=50)
+    assert wider.candidates == params["candidates"] == 50
+    narrower, params, _ = build_retriever("hybrid", chunks, "fake-embedder", min_candidates=10)
+    assert narrower.candidates == params["candidates"] == 30  # 기본값 아래로는 줄이지 않는다
