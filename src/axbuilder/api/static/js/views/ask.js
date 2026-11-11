@@ -176,9 +176,9 @@ export function createAskView(workspaceId) {
 
   // 결과 한 줄 요약. 인용한 문서의 등급을 세어 역할에 따른 차이가 보이게 한다.
   function outcome(record) {
-    if (record.response.refused) return "답하지 않음";
+    if (record.response.refused) return "답하지 않음(근거 없음)";
     const citations = record.response.citations;
-    if (!citations.length) return "근거 없이 답함";
+    if (!citations.length) return "인용 없이 답함";
     const internal = citations.filter((citation) => {
       const doc = documentOf(citation.doc_id);
       return doc && doc.access_level === "internal";

@@ -4,6 +4,7 @@
 import { closeEvidence, openEvidence } from "../actions.js";
 import { $, badge, h, icon, replace, roleTag } from "../dom.js";
 import { docTypeLabel } from "../format.js";
+import { renderPassage } from "../passage.js";
 import { documentOf, findRecord, hasPages, on, state } from "../state.js";
 
 let returnTo = null; // 패널을 닫으면 포커스를 돌려줄 인용 칩
@@ -11,7 +12,8 @@ let returnTo = null; // 패널을 닫으면 포커스를 돌려줄 인용 칩
 export function citationLabel(citation) {
   const parts = [];
   if (citation.article) parts.push(String(citation.article));
-  // 쪽 번호는 PDF에서만 뜻이 있다(txt·md·hwpx는 늘 1쪽으로 온다)
+  // 쪽이 없는 문서(txt·md·hwpx)는 page가 null로 온다. 예전에 색인한 워크스페이스는 다시 색인하기
+  // 전까지 1이 올 수 있어서 PDF인지도 함께 본다
   if (typeof citation.page === "number" && hasPages(citation.doc_id)) parts.push(`${citation.page}쪽`);
   return parts.join(", ");
 }
@@ -130,7 +132,7 @@ function render() {
       ),
       text === null
         ? h("p", { class: "evidence-missing", text: "이 인용의 원문을 받지 못했습니다." })
-        : h("div", { class: "passage", text }),
+        : renderPassage(text),
       h(
         "dl",
         { class: "evidence-facts" },

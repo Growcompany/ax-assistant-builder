@@ -2115,6 +2115,71 @@ textarea {
   overflow-wrap: anywhere;
 }
 
+/* 원문 안의 구조(마크다운 문서에서 온 소제목·표·목록). 평문은 .passage-text 그대로 */
+.passage {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.passage-text {
+  white-space: pre-wrap;
+}
+
+.passage-heading {
+  margin-top: var(--s1);
+  font-family: var(--font-ui);
+  font-size: var(--fs-2);
+  letter-spacing: -0.02em;
+  white-space: normal;
+}
+
+.passage-list {
+  display: flex;
+  flex-direction: column;
+  padding-left: 1.6em;
+  white-space: normal;
+}
+
+ul.passage-list {
+  list-style: disc;
+}
+
+ol.passage-list {
+  list-style: decimal;
+}
+
+.passage-list li::marker {
+  color: var(--ink-2);
+}
+
+.passage-table-wrap {
+  overflow-x: auto;
+}
+
+.passage-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-family: var(--font-ui);
+  font-size: var(--fs-1);
+  line-height: 1.6;
+  letter-spacing: -0.01em;
+  white-space: normal;
+}
+
+.passage-table th,
+.passage-table td {
+  padding: 6px var(--s3) 6px 0;
+  border-bottom: 1px solid var(--line);
+  font-weight: var(--regular);
+  text-align: left;
+  vertical-align: top;
+}
+
+.passage-table th {
+  color: var(--ink-3);
+}
+
 .evidence-missing {
   color: var(--ink-2);
 }
