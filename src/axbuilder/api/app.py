@@ -75,7 +75,7 @@ from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
-from axbuilder import fsutil
+from axbuilder import __version__, fsutil
 from axbuilder.api import v1
 from axbuilder.api.access import (
     KEY_SCOPE,
@@ -1226,7 +1226,7 @@ def create_app(
 
     app = FastAPI(
         title="AX Assistant Builder",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
         # Swagger·ReDoc 화면은 기본으로 끈다(Settings.api_docs). /openapi.json은 남는다
         docs_url="/docs" if settings.api_docs else None,
