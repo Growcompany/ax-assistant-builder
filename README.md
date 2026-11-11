@@ -84,7 +84,7 @@ v0.2.0 뒤의 코드는 `화면:` 줄 앞에 리랭커 상태를 한 줄 더 알
 - **임베딩 모델**: 첫 색인 때 `dragonkue/snowflake-arctic-embed-l-v2.0-ko`(Hugging Face 캐시 기준 약 2.2GB)를 받는다.
 - **Ollama가 꺼져 있어도 서버는 뜬다.** 시작 줄과 화면이 할 일(`ollama serve`, `ollama pull <모델>`)을 알려 준다. 모델 내려받기는 서버가 대신하지 않는다.
 - **`axb serve` 옵션**: `--port`(기본 8000), `--host`(기본 127.0.0.1), `--no-browser`, `--data-dir`(기본: `AXB_DATA_DIR` 또는 `data`). 실행 파일 없이 `python -m axbuilder.cli serve`로도 된다. `uvicorn axbuilder.api.main:app`으로 직접 띄울 수도 있다(주의점은 [ADR 0005](docs/adr/0005-integration-surface.md#운영-경고)).
-- **리랭커 켜기(선택, 기본 꺼짐)**: `AXB_RERANKER=kure-nano axb serve`. `.[ml]`이 필요하다. 모델(`nlpai-lab/KURE-Reranker-nano`, 0.6GB)은 서버를 띄울 때가 아니라 처음 질문할 때 내려받아 올리므로 첫 질문이 느리다. 저장소 주인이 2026-11-12에 예시 은행으로 잰 값은 첫 질문 21.6초(모델을 올리는 시간), 이후 1.8~2.2초다. 값은 `none`·`kure-nano`·`bge-v2-m3`만 받는다. 그 밖의 값(예: `best`)은 `설정 오류: …` 한 줄과 종료 코드 2로 끝난다. 리랭커를 불러오지 못하면 리랭커 없이 답하지 않고 질문이 503이 된다. 8GB GPU에서 함께 돌 때의 비용은 [한계](#한계)의 "운영", 결정은 [ADR 0006](docs/adr/0006-reranker.md).
+- **리랭커 켜기(선택, 기본 꺼짐)**: `AXB_RERANKER=kure-nano axb serve`. `.[ml]`이 필요하다. 모델(`nlpai-lab/KURE-Reranker-nano`, 0.6GB)은 서버를 띄울 때가 아니라 처음 질문할 때 내려받아 올리므로 첫 질문이 느리다. 구현 세션의 에이전트가 2026-11-12에 예시 은행으로 잰 값은 첫 질문 21.6초(모델을 올리는 시간), 이후 1.8~2.2초다. 값은 `none`·`kure-nano`·`bge-v2-m3`만 받는다. 그 밖의 값(예: `best`)은 `설정 오류: …` 한 줄과 종료 코드 2로 끝난다. 리랭커를 불러오지 못하면 리랭커 없이 답하지 않고 질문이 503이 된다. 8GB GPU에서 함께 돌 때의 비용은 [한계](#한계)의 "운영", 결정은 [ADR 0006](docs/adr/0006-reranker.md).
 - **환경 변수**: [`.env.example`](.env.example)에 `AXB_*` 전체와 기본값이 있다. 코드는 `.env` 파일을 읽지 않고 환경 변수만 본다.
 - **pip 미러**: 이 저장소를 만든 PC는 시스템 pip 설정에 응답하지 않는 미러가 있어서 `PIP_CONFIG_FILE=nul pip install …`로 설정 파일을 무시했다. 보통은 필요 없다.
 
@@ -527,7 +527,7 @@ for role, question in [
 - **사람(저장소 주인)**: 방향과 우선순위를 정하고, 설치와 비용을 승인하고, 골든셋과 라벨을 확인한다. 지금은 [확인 목록](docs/eval/golden-v0-owner-check.md) 11문항과 [거절 라벨](docs/eval/refusal-labels.md#주인이-확인할-항목-애매-7개) 7개가 확인 대기 중이다. 에이전트의 원문 전수 대조는 사람 검수를 대신하지 않는다. 작업마다 남긴 [학습 노트](docs/learning/)로 코드를 이해하고 면접에서 설명한다.
 - **검증**: CI가 `ruff`와 `pytest`를 네트워크·GPU 없이 돌린다. 실제 모델은 `@pytest.mark.slow` 테스트와 수동 실행으로 확인한다. 실험 기록에는 재현 명령, 커밋, 데이터 지문을 적는다.
 - **화면과 외부 연결의 수동 확인(2026-11-11)**: `axb serve`로 띄운 실제 서버와 `qwen3.5:4b-q4_K_M`에서 브라우저로 만들기 3단계(한글 이름, 한글 파일 이름), 질문과 인용 원문, 역할별 답 차이, 키 발급을 확인했다. 실제 `openai` SDK로 `/v1/chat/completions`(일반, `stream=True`)를, 실제 MCP 클라이언트로 `axb mcp`를 불렀다. 기록은 [ADR 0004](docs/adr/0004-web-ui-static.md)·[ADR 0005](docs/adr/0005-integration-surface.md)의 "결과"와 학습 노트 [15](docs/learning/task-15-models-quick-create.md)·[16](docs/learning/task-16-integrations.md)에 있다. 보안 리뷰 지적을 반영한 뒤 다시 돌린 검색 평가 3종(Recall@5/MRR: BM25 0.841/0.746, dense 0.886/0.880, hybrid 0.864/0.824)은 기준선과 같았다.
-- **리랭커를 켠 서버의 수동 확인(2026-11-12, 저장소 주인)**: `AXB_RERANKER=kure-nano axb serve`로 띄운 실제 서버에서 예시 은행 워크스페이스에 질문했다. 첫 질문은 21.6초(모델을 올리는 시간), 이후는 1.8~2.2초였다. `준법감시`는 내부 지침 제11조를 인용해 답했고 `상담원`에게는 내부 지침이 나오지 않았다. `AXB_RERANKER=best`는 `설정 오류: …` 한 줄과 종료 코드 2로 끝났다. 이 변경을 모은 브랜치(`task/19-golden-audit`)의 전체 테스트는 1,455 passed였다.
+- **리랭커를 켠 서버의 수동 확인(2026-11-12, 구현 세션의 에이전트)**: `AXB_RERANKER=kure-nano axb serve`로 띄운 실제 서버에서 예시 은행 워크스페이스에 질문했다. 첫 질문은 21.6초(모델을 올리는 시간), 이후는 1.8~2.2초였다. `준법감시`는 내부 지침 제11조를 인용해 답했고 `상담원`에게는 내부 지침이 나오지 않았다. `AXB_RERANKER=best`는 `설정 오류: …` 한 줄과 종료 코드 2로 끝났다. 이 변경을 모은 브랜치(`task/19-golden-audit`)의 전체 테스트는 1,455 passed였다.
 
 ## 문서 지도
 
