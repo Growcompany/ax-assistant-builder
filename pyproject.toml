@@ -28,6 +28,13 @@ dev = [
 ml = [
     "sentence-transformers",
 ]
+# MCP 서버(axb mcp)용. 기본 설치와 단위 테스트는 이것 없이 돈다
+mcp = [
+    "mcp>=2",
+]
+
+[project.scripts]
+axb = "axbuilder.cli:main"
 
 [build-system]
 requires = ["setuptools>=69"]
@@ -35,6 +42,10 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# 화면 파일(HTML·CSS·JS)을 설치본에도 넣는다
+[tool.setuptools.package-data]
+"axbuilder.api" = ["static/**"]
 
 [tool.ruff]
 line-length = 100

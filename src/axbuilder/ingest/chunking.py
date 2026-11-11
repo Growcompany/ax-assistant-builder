@@ -140,7 +140,7 @@ def _to_chunks(doc: Document, pieces: list[Piece], page_at: Callable[[int], int]
             workspace_id=doc.workspace_id,
             title=doc.meta.title,
             text=body,
-            page=page_at(pos),
+            page=page_at(pos) if doc.paged else None,
             article=article,
             access_level=doc.meta.access_level,
         )

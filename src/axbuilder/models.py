@@ -25,6 +25,9 @@ class Document(BaseModel):
     meta: DocMeta
     workspace_id: str
     pages: list[Page]
+    # 원문에 쪽이 있는가. txt·md·hwpx는 쪽이 없어 로더가 Page 하나(number=1)로 읽는다. 그 1을
+    # 청크에 달면 모든 인용이 뜻 없는 "p.1"이 되므로, False면 청크의 page를 비운다
+    paged: bool = True
 
 
 class Chunk(BaseModel):

@@ -99,6 +99,9 @@ def llm() -> RecordingLLM:
 def open_client(settings: Settings, llm, embedder=None, **kwargs) -> TestClient:
     app = create_app(settings, llm=llm, embedder=embedder or HashEmbedder())
     # Host 허용 목록 때문에 실제 사용처럼 127.0.0.1로 부른다 (TestClient 기본값은 testserver)
+    # 관리 API와 화면은 이 PC(loopback)에서 온 요청만 받는다. TestClient의 기본 클라이언트 주소
+    # ("testclient")는 loopback이 아니라서 주소도 맞춘다
+    kwargs.setdefault("client", ("127.0.0.1", 50000))
     return TestClient(app, base_url="http://127.0.0.1", **kwargs)
 
 
@@ -201,7 +204,7 @@ def test_health(client):
 
 def test_create_workspace_201_then_409(client, settings):
     r = client.post("/workspaces", json=WS)
-    assert r.status_code == 201 and r.json() == WS
+    assert r.status_code == 201 and r.json() == {**WS, "llm_model": None}
     assert (settings.data_dir / "workspaces" / "bank" / "workspace.yaml").is_file()
     assert client.post("/workspaces", json=WS).status_code == 409
 
@@ -231,7 +234,7 @@ def test_ask_response_shape(client):
     setup_indexed(client)
     r = ask(client)
     body = r.json()
-    assert set(body) == {"answer", "citations", "refused", "latency_ms"}
+    assert set(body) == {"answer", "citations", "refused", "latency_ms", "passages", "model"}
     assert body["refused"] is False and body["latency_ms"] >= 0
     assert body["answer"] == "보호한도는 대통령령으로 정합니다 [1]."
     assert set(body["citations"][0]) == {"chunk_id", "doc_id", "title", "page", "article"}
@@ -294,7 +297,10 @@ def test_cross_site_browser_requests_are_rejected(client, settings):
     # 사이트는 포트를 보지 않아 다른 포트의 로컬 페이지(localhost:3000)는 same-site다. 이것도 막는다
     same_site = {"Sec-Fetch-Site": "same-site"}
     assert client.post("/workspaces/bank/index", headers=same_site).status_code == 403
-    assert client.get("/health", headers=cross).status_code == 200  # 읽기는 그대로
+    # PR #20 리뷰: 다른 사이트가 보낸 GET도 받지 않는다(핸들러가 돌고 상태 코드로 정보가 샌다).
+    # Sec-Fetch-Site가 없는 클라이언트(curl·httpx)의 읽기는 그대로다
+    assert client.get("/health", headers=cross).status_code == 403
+    assert client.get("/health").status_code == 200
     assert files_under(settings.data_dir) == {"workspaces/bank/workspace.yaml"}
 
 

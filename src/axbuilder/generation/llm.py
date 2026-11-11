@@ -3,14 +3,18 @@
 import logging
 import re
 import time
+from collections.abc import Sequence
 from typing import Protocol
 
 import anthropic
 import httpx
 
 # LLMResponse는 Answer도 담는 데이터라 models에 두고, 이 모듈에서도 import할 수 있게 둔다
+from pydantic import BaseModel
+
 from axbuilder.models import LLMResponse
 from axbuilder.settings import Settings
+from axbuilder.workspace import is_valid_llm_model_name
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +35,9 @@ CLAUDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
 # anthropic 2.x는 httpx2 기반이라 httpx.Timeout이 아니라 anthropic.Timeout을 쓴다
 CLAUDE_TIMEOUT = anthropic.Timeout(120.0, connect=5.0)
 CLAUDE_MAX_RETRIES = 1
+# 모델 목록(/api/tags)은 화면 첫머리와 axb serve 시작 때 부른다. Ollama가 응답하지 않을 때
+# 화면이 오래 멈추지 않게 생성(120초)보다 훨씬 짧게 잡는다
+OLLAMA_TAGS_TIMEOUT = 3.0
 
 
 class LLMClient(Protocol):
@@ -41,6 +48,19 @@ class LLMClient(Protocol):
 
 class LLMUnavailableError(RuntimeError):
     """LLM을 부를 수 없다(서버 꺼짐, 시간 초과, 인증 실패 등). 메시지에 해결 방법을 담는다."""
+
+
+class OllamaNotRunningError(LLMUnavailableError):
+    """Ollama 서버에 연결조차 되지 않는다(꺼져 있거나 설치되지 않음)."""
+
+
+class OllamaModel(BaseModel):
+    """Ollama에 설치된 모델 하나 (/api/tags의 항목)."""
+
+    name: str
+    size_bytes: int | None = None
+    parameter_size: str | None = None  # "4.0B"
+    quantization: str | None = None  # "Q4_K_M"
 
 
 # URL의 계정 정보: "://" 뒤부터 경로 전의 마지막 "@"까지 (비밀번호에 "@"가 그대로 든 경우 포함)
@@ -76,6 +96,74 @@ def _split_ollama_url(base_url: str) -> tuple[str, tuple[str, str] | None]:
     if not url.userinfo:
         return base_url, None
     return str(url.copy_with(username=None, password=None)), (url.username, url.password)
+
+
+def list_ollama_models(
+    base_url: str,
+    timeout: float = OLLAMA_TAGS_TIMEOUT,
+    transport: httpx.BaseTransport | None = None,
+) -> list[OllamaModel]:
+    """Ollama에 설치된 모델(이름순). 연결되지 않으면 OllamaNotRunningError, 그 밖에 목록을 읽지
+    못하면 LLMUnavailableError. base_url이 쓸 수 없는 값이면 ValueError(_split_ollama_url).
+
+    OllamaClient와 같은 규칙으로 부른다: URL의 계정 정보는 auth로 옮기고 프록시 환경변수를 따르지
+    않는다. 이름이 형식에 맞지 않는 항목은 워크스페이스에 고를 수 없으므로 뺀다.
+    """
+    url, auth = _split_ollama_url(base_url)
+    try:
+        with httpx.Client(
+            base_url=url, auth=auth, timeout=timeout, transport=transport, trust_env=False
+        ) as http:
+            response = http.get("/api/tags")
+            response.raise_for_status()
+    except (httpx.ConnectError, httpx.ConnectTimeout) as e:
+        raise OllamaNotRunningError(
+            f"Ollama 서버({url})에 연결할 수 없습니다. "
+            "Ollama가 실행 중인지 확인하세요: ollama serve"
+        ) from e
+    except httpx.HTTPError as e:
+        raise LLMUnavailableError(
+            f"Ollama 서버({url})에서 모델 목록을 읽지 못했습니다({type(e).__name__})"
+        ) from e
+    try:
+        items = response.json()["models"]
+        if not isinstance(items, list):
+            raise TypeError("models is not a list")
+        models = [_ollama_model(item) for item in items]
+    except (ValueError, KeyError, TypeError) as e:
+        raise LLMUnavailableError(f"Ollama 서버({url})의 모델 목록 형식이 예상과 다릅니다") from e
+    return sorted(
+        (m for m in models if is_valid_llm_model_name(m.name)), key=lambda m: m.name.lower()
+    )
+
+
+# /api/tags의 parameter_size·quantization_level로 받아 주는 모양 (32자까지)
+_MODEL_DETAIL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,31}")
+
+
+def _ollama_model(item: object) -> OllamaModel:
+    if not isinstance(item, dict) or not isinstance(item.get("name"), str):
+        raise TypeError("model entry without a name")
+    details = item.get("details")
+    details = details if isinstance(details, dict) else {}
+
+    def text(value: object) -> str | None:
+        # 다른 서버가 준 글자를 그대로 화면에 넘기지 않는다: 짧은 표기("4.0B", "Q4_K_M")만
+        return value if isinstance(value, str) and _MODEL_DETAIL.fullmatch(value) else None
+
+    size = item.get("size")
+    return OllamaModel(
+        name=item["name"],
+        size_bytes=size if isinstance(size, int) and not isinstance(size, bool) else None,
+        parameter_size=text(details.get("parameter_size")),
+        quantization=text(details.get("quantization_level")),
+    )
+
+
+def has_ollama_model(models: Sequence[OllamaModel], name: str) -> bool:
+    """name이 설치돼 있는가. 태그 없는 이름("qwen3")은 Ollama에서 "qwen3:latest"다."""
+    names = {model.name for model in models}
+    return name in names or (":" not in name and f"{name}:latest" in names)
 
 
 class OllamaClient:
