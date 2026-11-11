@@ -30,6 +30,8 @@ from axbuilder.settings import Settings
 # 받고(axbuilder.api.access), 밖에서는 API 키로 /v1/* 만 쓸 수 있다
 HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
+# X-Forwarded-For를 믿어 줄 상대: 이 PC의 프록시뿐 (IPv4, IPv6, IPv4-mapped IPv6 loopback)
+TRUSTED_FORWARDERS = "127.0.0.1,::1,::ffff:127.0.0.1"
 BROWSER_WAIT_SECONDS = 60.0  # 서버가 이 안에 뜨지 않으면 브라우저를 열지 않는다
 
 
@@ -188,10 +190,15 @@ def _serve(args: argparse.Namespace) -> int:
         open_browser_when_ready(url, args.port)
     # uvicorn은 기본으로 FORWARDED_ALLOW_IPS 환경변수(없으면 127.0.0.1)에서 온 요청의
     # X-Forwarded-For를 믿어 클라이언트 주소를 바꾼다. 환경변수가 "*"면 밖에서 온 요청이 머리글
-    # 하나로 이 PC인 척할 수 있으므로(관리 API가 열린다) 값을 고정한다. 127.0.0.1만 믿으면 주소가
-    # "이 PC → 밖"으로만 바뀔 수 있다(같은 PC의 프록시가 넘겨준 바깥 요청을 밖으로 본다)
+    # 하나로 이 PC인 척할 수 있으므로(관리 API가 열린다) 값을 고정한다. loopback만 믿으면 주소가
+    # "이 PC → 밖"으로만 바뀔 수 있다(같은 PC의 프록시가 넘겨준 바깥 요청을 밖으로 본다).
+    # IPv6 loopback도 넣는다: ::1로 붙는 프록시의 머리글을 무시하면 바깥 요청이 ::1로 남는다
     uvicorn.run(
-        app, host=args.host, port=args.port, proxy_headers=True, forwarded_allow_ips="127.0.0.1"
+        app,
+        host=args.host,
+        port=args.port,
+        proxy_headers=True,
+        forwarded_allow_ips=TRUSTED_FORWARDERS,
     )
     return 0
 

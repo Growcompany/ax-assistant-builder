@@ -105,6 +105,8 @@ def ask_tool(
     if len(question) > MAX_QUESTION_CHARS:
         raise ToolError(f"질문이 너무 깁니다(상한 {MAX_QUESTION_CHARS}자)")
     ws = _workspace(service, workspace)
+    if role is not None and not isinstance(role, str):
+        raise ToolError("역할은 역할 이름(문자열) 하나여야 합니다")
     if role is None and len(ws.roles) == 1:
         role = next(iter(ws.roles))
     if role is None or role not in ws.roles:

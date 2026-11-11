@@ -126,7 +126,10 @@ def test_serve_no_browser_runs_uvicorn_on_loopback(served, capsys):
     assert kwargs["host"] == "127.0.0.1" and kwargs["port"] == port
     # 환경변수 FORWARDED_ALLOW_IPS="*"가 있어도 밖에서 온 요청이 X-Forwarded-For로 이 PC인 척할
     # 수 없게 고정한다
-    assert kwargs["forwarded_allow_ips"] == "127.0.0.1"
+    # IPv6 loopback(::1)으로 붙는 같은 PC의 프록시도 넣는다: 빼면 그 프록시가 넘긴 바깥 요청이 이
+    # PC에서 온 것으로 남는다
+    assert kwargs["proxy_headers"] is True
+    assert kwargs["forwarded_allow_ips"] == "127.0.0.1,::1,::ffff:127.0.0.1"
     assert served["browser"] == []
     assert f"http://127.0.0.1:{port}" in capsys.readouterr().out
 

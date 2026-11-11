@@ -137,6 +137,10 @@ def list_ollama_models(
     )
 
 
+# /api/tags의 parameter_size·quantization_level로 받아 주는 모양 (32자까지)
+_MODEL_DETAIL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._ -]{0,31}")
+
+
 def _ollama_model(item: object) -> OllamaModel:
     if not isinstance(item, dict) or not isinstance(item.get("name"), str):
         raise TypeError("model entry without a name")
@@ -144,7 +148,8 @@ def _ollama_model(item: object) -> OllamaModel:
     details = details if isinstance(details, dict) else {}
 
     def text(value: object) -> str | None:
-        return value if isinstance(value, str) and value else None
+        # 다른 서버가 준 글자를 그대로 화면에 넘기지 않는다: 짧은 표기("4.0B", "Q4_K_M")만
+        return value if isinstance(value, str) and _MODEL_DETAIL.fullmatch(value) else None
 
     size = item.get("size")
     return OllamaModel(

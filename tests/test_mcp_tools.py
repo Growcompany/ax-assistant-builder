@@ -256,3 +256,10 @@ def test_tool_errors_reach_the_client_with_their_message(service):
         )
     assert "역할" in str(error.value)
     assert "Traceback" not in str(error.value)
+
+
+@pytest.mark.parametrize("role", [["상담원"], {"상담원": 1}, 5, ("상담원",)])
+def test_ask_role_that_is_not_a_string_is_a_readable_error(service, role):
+    # 모델이 role에 목록 등을 넣어도 TypeError(unhashable)가 아니라 읽을 수 있는 문장이다
+    with pytest.raises(ToolError, match="역할"):
+        ask_tool(service, "질문", workspace="bank", role=role)

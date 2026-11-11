@@ -258,7 +258,8 @@ def test_chat_llm_down_503(settings):
         setup_indexed(client)
         key = make_key(client)["key"]
         error = assert_error(chat(client, key), 503, "llm_unavailable")
-        assert "ollama serve" in error["message"]
+        # 키로 부르는 쪽에는 백엔드 상세를 주지 않는다 (tests/api/test_review_fixes.py)
+        assert error["message"] == "LLM을 사용할 수 없습니다. 이 어시스턴트의 관리자에게 문의하세요"
         # stream을 켜도 답을 만들기 전의 오류는 SSE가 아니라 오류 응답이다
         r = chat(client, key, stream=True)
         assert_error(r, 503, "llm_unavailable")

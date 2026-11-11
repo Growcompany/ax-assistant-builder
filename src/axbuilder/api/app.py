@@ -76,7 +76,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.responses import Response
 
 from axbuilder.api import v1
-from axbuilder.api.access import KEY_SCOPE, AccessRules, is_v1_path, openai_error
+from axbuilder.api.access import KEY_SCOPE, AccessRules, is_v1_scope, openai_error
 from axbuilder.api.keys import KeyStore
 from axbuilder.corpus import DOC_ID, load_sources, source_file
 from axbuilder.generation.answer import answer
@@ -119,6 +119,10 @@ MAX_JSON_BYTES = 64 * 1024
 # /v1/* 본문의 상한. 채팅 클라이언트는 이전 대화를 통째로 보낸다(쓰는 것은 마지막 user 메시지뿐).
 # 키가 있는 요청만 여기까지 온다
 MAX_V1_BYTES = 1024 * 1024
+# /v1/* 로 내보내는 고정 문구 (상세는 서버 로그와 이 PC의 관리 API에만)
+V1_LLM_UNAVAILABLE = "LLM을 사용할 수 없습니다. 이 어시스턴트의 관리자에게 문의하세요"
+V1_SEARCH_UNAVAILABLE = "문서 검색을 사용할 수 없습니다. 이 어시스턴트의 관리자에게 문의하세요"
+V1_INDEX_NOT_READY = "색인이 준비되지 않았습니다. 이 어시스턴트의 관리자에게 문의하세요"
 READ_CHUNK_BYTES = 1024 * 1024
 SUPPORTED_SUFFIXES = (".pdf", ".hwpx", ".txt", ".md")  # load_document가 읽는 형식
 # 규격(ISO 32000)은 %PDF- 머리글을 첫 줄에 두라고 하지만, Adobe Reader는 앞 1024바이트 안이면
@@ -982,7 +986,7 @@ class _BodySizeLimit:
             return
         if _UPLOAD_PATH.fullmatch(scope["path"]) is not None:
             max_bytes = self.upload_bytes
-        elif is_v1_path(scope["path"]):
+        elif is_v1_scope(scope):
             max_bytes = self.v1_bytes
         else:
             max_bytes = self.other_bytes
@@ -1171,30 +1175,45 @@ def create_app(
     # 마지막에 더한 것이 바깥이다. 순서(바깥 → 안): Host → 접근 규칙(loopback, 키) → Origin·
     # Sec-Fetch-Site → 본문 상한. 본문을 읽기 전에 모두 거른다
     app.add_middleware(_RejectCrossSite, allowed_hosts=settings.allowed_hosts)
-    app.add_middleware(AccessRules, keys=service.keys, cors_origins=settings.cors_origins)
+    app.add_middleware(
+        AccessRules,
+        keys=service.keys,
+        store=service.store,
+        cors_origins=settings.cors_origins,
+    )
     app.add_middleware(_RejectForeignHost, allowed_hosts=settings.allowed_hosts)
 
-    def error(request: Request, status_code: int, detail: str, code: str) -> JSONResponse:
-        """/v1/* 는 OpenAI 오류 모양, 그 밖은 {"detail": …}."""
-        if is_v1_path(request.url.path):
-            return openai_error(status_code, detail, code)
+    def error(
+        request: Request, status_code: int, detail: str, code: str, v1_detail: str | None = None
+    ) -> JSONResponse:
+        """/v1/* 는 OpenAI 오류 모양, 그 밖은 {"detail": …}.
+
+        v1_detail: /v1/* 로 내보낼 문구. 키로 부르는 쪽은 이 PC 밖의 사용자일 수 있어서, 백엔드
+        상세(내부 Ollama 주소, 모델 이름, 그 서버가 돌려준 본문, 관리 API 경로)를 주지 않는다.
+        상세와 해결 방법은 이 PC의 관리 API(화면)와 서버 로그에만 둔다.
+        """
+        if is_v1_scope(request.scope):
+            return openai_error(status_code, v1_detail or detail, code)
         return JSONResponse(status_code=status_code, content={"detail": detail})
 
     @app.exception_handler(LLMUnavailableError)
     async def _llm_unavailable(request: Request, exc: LLMUnavailableError) -> JSONResponse:
+        # local(Ollama)과 cloud(Claude)의 오류가 모두 이 예외로 온다
         logger.warning("LLM unavailable: %s", exc)
         detail = "LLM을 사용할 수 없습니다: " + _public_message(str(exc))
-        return error(request, 503, detail, "llm_unavailable")
+        return error(request, 503, detail, "llm_unavailable", V1_LLM_UNAVAILABLE)
 
     @app.exception_handler(EmbedderUnavailableError)
     async def _embedder_unavailable(
         request: Request, exc: EmbedderUnavailableError
     ) -> JSONResponse:
-        return error(request, 503, _public_message(str(exc)), "embedder_unavailable")
+        logger.warning("embedder unavailable: %s", exc)
+        detail = _public_message(str(exc))
+        return error(request, 503, detail, "embedder_unavailable", V1_SEARCH_UNAVAILABLE)
 
     @app.exception_handler(IndexNotReadyError)
     async def _index_not_ready(request: Request, exc: IndexNotReadyError) -> JSONResponse:
-        return error(request, 409, str(exc), "index_not_ready")
+        return error(request, 409, str(exc), "index_not_ready", V1_INDEX_NOT_READY)
 
     @app.exception_handler(Exception)
     async def _internal_error(request: Request, exc: Exception) -> JSONResponse:
@@ -1205,7 +1224,7 @@ def create_app(
 
     @app.exception_handler(StarletteHTTPException)
     async def _http_error(request: Request, exc: StarletteHTTPException) -> Response:
-        if not is_v1_path(request.url.path):
+        if not is_v1_scope(request.scope):
             return await http_exception_handler(request, exc)
         return openai_error(
             exc.status_code, str(exc.detail), getattr(exc, "code", None), exc.headers
@@ -1213,7 +1232,7 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def _validation_error(request: Request, exc: RequestValidationError) -> Response:
-        if not is_v1_path(request.url.path):
+        if not is_v1_scope(request.scope):
             return await request_validation_exception_handler(request, exc)
         # OpenAI 클라이언트는 요청 오류를 400으로 안다. 받은 값은 되돌려 주지 않는다
         first = exc.errors()[0] if exc.errors() else {}

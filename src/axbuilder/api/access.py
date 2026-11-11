@@ -8,23 +8,34 @@ Forwarded, X-Real-IP 같은 머리글은 요청을 보낸 쪽이 마음대로 �
 없거나 읽을 수 없으면 밖에서 온 것으로 본다.
 
 주의: scope의 client는 ASGI 서버가 채운다. uvicorn은 --forwarded-allow-ips(환경변수
-FORWARDED_ALLOW_IPS, 기본 127.0.0.1)에 있는 상대가 보낸 X-Forwarded-For로 이 값을 바꾼다. 기본값이면
-"이 PC → 밖"으로만 바뀌어 안전하지만, "*"로 두면 밖에서 온 요청이 이 PC인 척할 수 있다. axb serve는
-127.0.0.1로 고정한다. 같은 PC의 리버스 프록시 뒤에 둘 때는 프록시가 X-Forwarded-For를 붙이게 한다
-(붙이지 않으면 프록시가 넘긴 요청이 모두 이 PC에서 온 것으로 보인다).
+FORWARDED_ALLOW_IPS, uvicorn 0.54의 기본은 127.0.0.1,::1)에 있는 상대가 보낸 X-Forwarded-For로 이
+값을 바꾼다. loopback만 믿으면 "이 PC → 밖"으로만 바뀌어 안전하지만, "*"로 두면 밖에서 온 요청이
+이 PC인 척할 수 있다. axb serve는 loopback 주소(127.0.0.1, ::1, ::ffff:127.0.0.1)로 고정한다. 같은
+PC의 리버스 프록시 뒤에 둘 때는 프록시가 X-Forwarded-For를 붙이게 한다(붙이지 않으면 프록시가
+넘긴 요청이 모두 이 PC에서 온 것으로 보인다).
+
+하위 경로 배치(uvicorn --root-path, 다른 앱 아래에 mount)는 지원하지 않는다. 그때 서버는
+scope["path"]에 root_path를 붙여 주고 라우터는 그것을 뗀 경로로 보낸다. 그래서 /v1 판단은
+라우터가 보는 경로(route_path)로 하고, root_path가 있으면 밖에서 온 요청은 /v1/* 까지 모두 막는다.
 
 /v1/* 의 오류는 OpenAI 모양({"error": {message, type, code, param}})이다.
 """
 
 import ipaddress
+import logging
 import re
 from typing import Any
 
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse, Response
+from starlette._utils import get_route_path
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import MutableHeaders
 
-from axbuilder.api.keys import KeyStore
+from axbuilder.api.keys import KeyRecord, KeyStore
+from axbuilder.workspace import WorkspaceStore
+
+logger = logging.getLogger(__name__)
 
 KEY_SCOPE = "axb.key"  # 인증된 키(KeyRecord)를 ASGI scope에 두는 자리. 이 미들웨어만 쓴다
 UNAUTHORIZED_MESSAGE = "API 키가 없거나 올바르지 않습니다"
@@ -37,9 +48,21 @@ _HEADER_NAMES = re.compile(r"[A-Za-z0-9-]+(?: *, *[A-Za-z0-9-]+)*")
 CORS_METHODS = "GET, POST, OPTIONS"
 CORS_DEFAULT_HEADERS = "Authorization, Content-Type"
 CORS_MAX_AGE = "600"
+MAX_CORS_HEADER_LIST_CHARS = 1024  # preflight가 물어 온 머리글 목록을 되돌려 줄 때의 상한
 
 
-def is_v1_path(path: str) -> bool:
+def route_path(scope: Any) -> str:
+    """라우터가 보는 경로: scope["path"]에서 root_path를 뗀 것.
+
+    Starlette의 라우터가 쓰는 바로 그 함수로 구한다. 미들웨어와 라우터가 경로를 다르게 보면
+    "/v1/workspaces"(미들웨어에는 키로 쓰는 경로)가 "/workspaces"(관리 API)로 가는 틈이 생긴다.
+    """
+    return get_route_path(scope)
+
+
+def is_v1_scope(scope: Any) -> bool:
+    """이 요청이 /v1/* (API 키로 쓰는 경로)로 가는가. 라우터가 보는 경로로 판단한다."""
+    path = route_path(scope)
     return path == "/v1" or path.startswith("/v1/")
 
 
@@ -128,10 +151,37 @@ class AccessRules:
     Access-Control-Request-Method)는 브라우저가 Authorization을 붙이지 않으므로 키 없이 답한다.
     """
 
-    def __init__(self, app: Any, keys: KeyStore, cors_origins: tuple[str, ...]) -> None:
+    def __init__(
+        self, app: Any, keys: KeyStore, store: WorkspaceStore, cors_origins: tuple[str, ...]
+    ) -> None:
         self.app = app
         self.keys = keys
+        self.store = store
         self.cors_origins = frozenset(cors_origins)
+
+    def _still_bound(self, record: KeyRecord) -> bool:
+        """키가 가리키는 워크스페이스와 역할이 지금도 있는가. 읽을 수 없으면 False(fail-closed).
+
+        본문 검증이나 경로 탐색보다 먼저 확인한다: 역할이 없어진 키는 없는 키와 똑같이 401이어야
+        하고, 400·404로 "키는 살아 있다"는 것을 알려 주면 안 된다.
+        """
+        try:
+            workspace = self.store.get(record.workspace_id)
+        except Exception:  # 없음, 깨진 설정 파일, 읽기 오류
+            logger.warning(
+                "key %s points to workspace %s, which cannot be read",
+                record.key_id,
+                record.workspace_id,
+            )
+            return False
+        if record.role not in workspace.roles:
+            logger.warning(
+                "key %s of %s is bound to a role that no longer exists",
+                record.key_id,
+                record.workspace_id,
+            )
+            return False
+        return True
 
     def _cors_origin(self, scope: Any) -> str | None:
         origin = _single_header(scope, b"origin")
@@ -141,19 +191,22 @@ class AccessRules:
         if scope["type"] not in ("http", "websocket"):
             await self.app(scope, receive, send)
             return
-        v1 = is_v1_path(scope["path"])
+        v1 = is_v1_scope(scope)
+        # 밖에서 온 요청은 /v1/* 만. 하위 경로 배치(root_path)에서는 그것도 받지 않는다
+        outside_allowed = v1 and not scope.get("root_path")
+        loopback = is_loopback_client(scope.get("client"))
         if scope["type"] == "websocket":
             # websocket 경로는 없다. 생기더라도 밖에서, 또는 /v1 아래로는 열리지 않게
-            if v1 or not is_loopback_client(scope.get("client")):
+            if v1 or not loopback:
                 await send({"type": "websocket.close", "code": 1008})
                 return
             await self.app(scope, receive, send)
             return
+        if not loopback and not outside_allowed:
+            response = JSONResponse(status_code=403, content={"detail": LOOPBACK_ONLY_MESSAGE})
+            await response(scope, receive, send)
+            return
         if not v1:
-            if not is_loopback_client(scope.get("client")):
-                response = JSONResponse(status_code=403, content={"detail": LOOPBACK_ONLY_MESSAGE})
-                await response(scope, receive, send)
-                return
             await self.app(scope, receive, send)
             return
 
@@ -168,7 +221,9 @@ class AccessRules:
                 asked = _single_header(scope, b"access-control-request-headers") or ""
                 headers["Access-Control-Allow-Methods"] = CORS_METHODS
                 headers["Access-Control-Allow-Headers"] = (
-                    asked if _HEADER_NAMES.fullmatch(asked) else CORS_DEFAULT_HEADERS
+                    asked
+                    if len(asked) <= MAX_CORS_HEADER_LIST_CHARS and _HEADER_NAMES.fullmatch(asked)
+                    else CORS_DEFAULT_HEADERS
                 )
                 headers["Access-Control-Max-Age"] = CORS_MAX_AGE
             await Response(status_code=204, headers=headers)(scope, receive, send)
@@ -177,6 +232,9 @@ class AccessRules:
         authorization = _single_header(scope, b"authorization")
         match = _BEARER.fullmatch(authorization) if authorization is not None else None
         record = self.keys.authenticate(match.group(1) if match else None)
+        # 설정 파일을 읽으므로 이벤트 루프 밖에서 한다
+        if record is not None and not await run_in_threadpool(self._still_bound, record):
+            record = None
         if record is None:
             response = _unauthorized_response()
             response.headers.update(cors)
