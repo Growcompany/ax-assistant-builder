@@ -99,6 +99,7 @@ class _RejectDTD:
 
 def load_document(path: Path, meta: DocMeta, workspace_id: str) -> Document:
     suffix = path.suffix.lower()
+    paged = suffix == ".pdf"  # 쪽 번호가 뜻이 있는 형식
     if suffix == ".pdf":
         pages = _read_pdf(path)
     elif suffix == ".hwpx":
@@ -111,7 +112,7 @@ def load_document(path: Path, meta: DocMeta, workspace_id: str) -> Document:
     if not any(page.text.strip() for page in pages):
         # 스캔본 PDF는 글자가 이미지라 텍스트 층이 없다. OCR은 다음 마일스톤(학습 노트)
         logger.warning("no extractable text in %s (scanned PDF?); it will yield no chunks", path)
-    return Document(meta=meta, workspace_id=workspace_id, pages=pages)
+    return Document(meta=meta, workspace_id=workspace_id, pages=pages, paged=paged)
 
 
 def _read_pdf(path: Path) -> list[Page]:

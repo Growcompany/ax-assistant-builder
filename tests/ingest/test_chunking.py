@@ -77,7 +77,7 @@ def test_chunks_carry_document_fields():
     for c in chunks:
         assert (c.doc_id, c.workspace_id, c.title) == ("law-1", "bank", "예금자보호법(발췌)")
         assert c.access_level == "internal"
-        assert c.page == 1
+        assert c.page is None  # txt는 쪽이 없다 (tests/ingest/test_page_numbers.py)
 
 
 def test_article_text_stops_at_next_header():
