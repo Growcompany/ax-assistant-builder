@@ -24,7 +24,7 @@ export function createDocumentsView(workspaceId) {
       "span",
       { class: "drop-text" },
       h("strong", { text: "파일을 여기에 끌어다 놓거나 눌러서 고르세요" }),
-      h("span", { class: "drop-hint", text: "여러 개를 한 번에 넣을 수 있습니다. PDF, HWPX, TXT, MD. 파일 하나에 50MB까지." }),
+      h("span", { class: "drop-hint", text: "PDF, HWPX, TXT, MD. 하나에 50MB까지, 여러 개 가능." }),
     ),
   );
   const fileError = h("p", { class: "field-error", id: "up-file-error", hidden: true });
@@ -42,8 +42,8 @@ export function createDocumentsView(workspaceId) {
   const levels = h(
     "fieldset",
     { class: "level-field", "aria-describedby": "up-access_level-error" },
-    h("legend", { text: "등급 (이번에 올리는 파일 모두에 적용)" }),
-    h("div", { class: "level-options" }, level("public", "모든 역할이 볼 수 있습니다"), level("internal", "internal 권한이 있는 역할만 봅니다")),
+    h("legend", { text: "등급" }),
+    h("div", { class: "level-options" }, level("public", "모든 역할이 봅니다"), level("internal", "internal 권한이 있는 역할만 봅니다")),
     levelError,
   );
   const submitLabel = h("span", { text: "문서 올리기" });
@@ -63,7 +63,7 @@ export function createDocumentsView(workspaceId) {
       { class: "field" },
       h("label", { for: "up-source" }, "출처 ", h("span", { class: "optional", text: "선택" })),
       source,
-      h("p", { class: "field-hint", id: "up-source-hint", text: "이번에 올리는 파일 모두에 적습니다. 비워 두면 출처 없이 올립니다." }),
+      h("p", { class: "field-hint", id: "up-source-hint", text: "이번에 올리는 파일 모두에 적습니다." }),
       sourceError,
     ),
     levels,
@@ -195,7 +195,7 @@ export function createDocumentsView(workspaceId) {
           );
         }),
       ),
-      h("p", { class: "field-hint", text: "문서 id는 파일 이름에서 제안했습니다(소문자·숫자를 하이픈으로 이은 이름). 한글 이름처럼 만들 수 없으면 doc-001식 번호를 줍니다. 문서 종류도 이름에서 추정한 값이니 확인하세요." }),
+      h("p", { class: "field-hint", text: "문서 id와 종류는 파일 이름에서 제안한 값입니다. 고칠 수 있습니다." }),
     );
   }
 
@@ -320,7 +320,7 @@ export function createDocumentsView(workspaceId) {
             "div",
             { class: "notice-body" },
             h("p", { class: "notice-title", text: failed ? `${good.length}개 중 ${uploaded}개를 올렸습니다. ${failed}개는 올리지 못했습니다.` : `문서 ${uploaded}개를 올렸습니다.` }),
-            h("p", { class: "notice-text", text: `답에 반영하려면 위의 색인 버튼으로 색인을 다시 만드세요.${failed ? " 실패한 파일은 아래에 이유가 있습니다." : ""}` }),
+            h("p", { class: "notice-text", text: "답에 반영하려면 색인을 다시 만드세요." }),
           ),
         ),
       );
@@ -348,7 +348,7 @@ export function createDocumentsView(workspaceId) {
     if (!documents.length) {
       replace(
         tableSlot,
-        h("div", { class: "docs-empty" }, h("p", { class: "gate-title", text: "아직 올린 문서가 없습니다" }), h("p", { class: "gate-text", text: "아래에서 문서를 올리세요. 올린 뒤 색인을 만들면 질문할 수 있습니다." })),
+        h("div", { class: "docs-empty" }, h("p", { class: "gate-title", text: "아직 올린 문서가 없습니다" }), h("p", { class: "gate-text", text: "문서를 올리고 색인을 만들면 질문할 수 있습니다." })),
       );
       return;
     }

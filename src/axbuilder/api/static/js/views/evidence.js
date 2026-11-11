@@ -55,9 +55,8 @@ function render() {
         "div",
         { class: "evidence-empty" },
         h("h2", { class: "evidence-heading", text: "근거 원문" }),
-        h("p", { text: "답변의 번호나 근거 목록을 누르면, 그 문장이 나온 문서의 원문이 여기에 열립니다." }),
-        h("p", { class: "evidence-empty-note", text: "원문은 그 질문에서, 그 역할로 검색된 부분만 보여 줍니다." }),
-      ),
+        h("p", { text: "답변의 번호를 누르면 그 문장이 나온 원문이 여기에 열립니다." }),
+              ),
     );
     return;
   }

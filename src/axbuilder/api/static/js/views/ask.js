@@ -54,7 +54,7 @@ export function createAskView(workspaceId) {
     h(
       "div",
       { class: "composer-meta" },
-      h("span", { id: "question-hint", text: "Enter로 보내기, Shift+Enter로 줄바꿈" }),
+      h("span", { id: "question-hint", text: "Enter 보내기, Shift+Enter 줄바꿈" }),
       counter,
     ),
     questionError,
@@ -201,7 +201,7 @@ export function createAskView(workspaceId) {
     return h(
       "div",
       { class: "compare" },
-      h("p", { class: "compare-title", text: "같은 질문을 다른 역할로 물었습니다" }),
+      h("p", { class: "compare-title", text: "같은 질문, 다른 역할" }),
       h(
         "ul",
         { class: "compare-sides" },
@@ -236,7 +236,7 @@ export function createAskView(workspaceId) {
     return h(
       "div",
       { class: "reask" },
-      h("span", { class: "reask-label", text: "다른 역할로 다시 묻기" }),
+      h("span", { class: "reask-label", text: "다른 역할로 묻기" }),
       others.map((role) =>
         h(
           "button",
@@ -268,7 +268,7 @@ export function createAskView(workspaceId) {
           { class: "refusal" },
           h("p", { class: "refusal-label" }, h("span", { class: "refusal-mark", "aria-hidden": "true" }), "근거 없음 — 답하지 않음"),
           renderAnswer(response.answer, count, (number) => citeChip(record, number)),
-          h("p", { class: "refusal-note", text: `${record.role} 역할이 볼 수 있는 문서에서 근거를 찾지 못했습니다.` }),
+          h("p", { class: "refusal-note", text: `${record.role} 역할이 볼 수 있는 문서에 근거가 없습니다.` }),
         ),
       );
     } else {
@@ -284,7 +284,7 @@ export function createAskView(workspaceId) {
         ),
       );
     } else if (!response.refused) {
-      parts.push(h("p", { class: "no-sources" }, icon("alert"), "인용이 붙지 않은 답입니다. 어느 문서에서 왔는지 확인할 수 없으니 그대로 믿지 마세요."));
+      parts.push(h("p", { class: "no-sources" }, icon("alert"), "인용이 없는 답입니다. 근거를 확인할 수 없습니다."));
     }
     const latency = formatLatency(response.latency_ms);
     parts.push(
@@ -330,7 +330,7 @@ export function createAskView(workspaceId) {
       h(
         "p",
         { class: "progress-text" },
-        `${record.role} 역할이 볼 수 있는 문서에서 근거를 찾아 답을 쓰는 중입니다. 경과 `,
+        "근거를 찾아 답을 쓰는 중입니다. 경과 ",
         h("span", { class: "elapsed", data: { since: record.startedAt }, text: "0초" }),
       ),
       h(
@@ -346,8 +346,7 @@ export function createAskView(workspaceId) {
       "div",
       { class: "cancelled" },
       h("p", { class: "cancelled-title", text: "질문을 취소했습니다" }),
-      h("p", { class: "notice-text", text: "화면은 답을 기다리지 않습니다. 서버가 이미 쓰기 시작한 답은 끝날 때까지 계속될 수 있습니다." }),
-      h(
+            h(
         "div",
         null,
         h(
@@ -483,8 +482,7 @@ export function createAskView(workspaceId) {
       replace(
         gate,
         h("p", { class: "gate-title", text: "먼저 문서를 올리세요" }),
-        h("p", { class: "gate-text", text: "문서를 올리고 색인을 만들면 질문할 수 있습니다." }),
-        h("button", { class: "btn btn-primary", type: "button", on: { click: () => setTab("documents") } }, "문서 탭으로 가기"),
+                h("button", { class: "btn btn-primary", type: "button", on: { click: () => setTab("documents") } }, "문서 탭으로 가기"),
       );
       return true;
     }
@@ -492,7 +490,7 @@ export function createAskView(workspaceId) {
     replace(
       gate,
       h("p", { class: "gate-title", text: "먼저 색인을 만드세요" }),
-      h("p", { class: "gate-text", text: `올린 문서 ${detail.documents}개를 검색할 수 있게 색인을 만들어야 질문할 수 있습니다. 수십 초가 걸릴 수 있습니다.` }),
+      h("p", { class: "gate-text", text: `올린 문서 ${detail.documents}개를 검색할 수 있게 만듭니다. 수십 초가 걸립니다.` }),
       h(
         "button",
         { class: "btn btn-primary", type: "button", disabled: Boolean(busy), on: { click: () => buildIndex(id) } },
@@ -523,10 +521,9 @@ export function createAskView(workspaceId) {
             class: "notice-title",
             text: waiting
               ? `색인 뒤 올린 문서 ${waiting}개는 아직 답에 반영되지 않습니다.`
-              : "색인이 지금 문서와 맞는지 확인할 수 없습니다. 다시 만들면 모든 문서가 답에 반영됩니다.",
+              : "색인이 오래됐습니다. 다시 만들면 모든 문서가 답에 반영됩니다.",
           }),
-          h("p", { class: "notice-text", text: "질문은 지금도 할 수 있습니다. 답은 마지막으로 색인한 문서에서만 찾습니다." }),
-        ),
+                  ),
         h(
           "button",
           { class: "btn btn-primary", type: "button", disabled: Boolean(busy), on: { click: () => buildIndex(workspaceId) } },
@@ -553,8 +550,8 @@ export function createAskView(workspaceId) {
     if (empty && detail && !gated) {
       replace(
         emptyState,
-        h("h2", { class: "ask-empty-title", text: "질문하면 문서의 조항을 인용해 답합니다" }),
-        h("p", { class: "ask-empty-text", text: "아래에서 역할을 고르세요. 역할이 볼 수 있는 등급의 문서에서만 답을 찾고, 근거가 없으면 답하지 않습니다." }),
+        h("h2", { class: "ask-empty-title", text: "문서에 대해 질문하세요" }),
+        h("p", { class: "ask-empty-text", text: "고른 역할이 볼 수 있는 문서에서만 답을 찾고, 근거가 없으면 답하지 않습니다." }),
         exampleList(detail),
       );
       emptyState.hidden = false;

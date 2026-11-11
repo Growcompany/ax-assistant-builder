@@ -150,11 +150,7 @@ export function badge(level) {
   );
 }
 
-export function roleTag(role, levels) {
-  return h(
-    "span",
-    { class: "role-tag" },
-    h("span", { class: "role-name", text: role }),
-    h("span", { class: "role-levels" }, (levels || []).map(badge)),
-  );
+// 역할 표지. 이름만 보여 준다: 등급은 역할을 고르는 곳에서 한 번만 보여 주고 기록마다 되풀이하지 않는다.
+export function roleTag(role) {
+  return h("span", { class: "role-tag" }, h("span", { class: "role-name", text: role }));
 }

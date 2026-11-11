@@ -131,7 +131,7 @@ function renderHead() {
           h(
             "p",
             { class: "progress-text" },
-            "문서를 읽고 색인을 만드는 중입니다. 문서가 많으면 수십 초가 걸립니다. 경과 ",
+            "색인을 만드는 중입니다. 경과 ",
             h("span", { class: "elapsed", data: { since: busy.startedAt }, text: "0초" }),
           ),
         )

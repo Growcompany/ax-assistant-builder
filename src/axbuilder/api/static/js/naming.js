@@ -12,6 +12,7 @@ const MAX_WORKSPACE_ID = 32;
 // 파일 이름에서 영문·숫자만 남겨 "-"로 잇는다. 규칙에 맞지 않으면 빈 문자열.
 //   "Loan Policy (2026) v2.PDF" -> "loan-policy-2026-v2"
 //   "2026년 여신규정 v3.pdf"     -> "2026-v3"
+//   "인사 규정(2026).md"         -> ""   (숫자만 남으면 뜻이 없어 번호를 준다)
 //   "대출 규정.pdf"              -> ""   (남는 글자가 없다)
 //   "con.txt"                    -> ""   (Windows 장치 이름은 서버가 거절한다)
 export function docIdFromName(filename) {
@@ -21,7 +22,8 @@ export function docIdFromName(filename) {
     .replace(/^-+|-+$/g, "")
     .slice(0, MAX_DOC_ID)
     .replace(/-+$/, "");
-  return slug && checkDocId(slug) === null ? slug : "";
+  // 영문자가 하나도 없으면(숫자만 남으면) 쓰지 않는다
+  return /[a-z]/.test(slug) && checkDocId(slug) === null ? slug : "";
 }
 
 // 쓰지 않은 가장 작은 번호의 "doc-001"식 id.

@@ -148,9 +148,8 @@ function renderModelStatus() {
 }
 
 function effectiveTheme() {
-  const set = document.documentElement.getAttribute("data-theme");
-  if (set === "light" || set === "dark") return set;
-  return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  // 밝은 화면이 기본이다. 어두운 화면은 사용자가 골랐을 때만
+  return document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
 }
 
 function renderThemeToggle() {
@@ -175,11 +174,11 @@ export function mountSidebar(openNewWorkspace) {
   });
   $("theme-toggle").addEventListener("click", () => {
     const next = effectiveTheme() === "dark" ? "light" : "dark";
-    document.documentElement.setAttribute("data-theme", next);
+    if (next === "dark") document.documentElement.setAttribute("data-theme", "dark");
+    else document.documentElement.removeAttribute("data-theme");
     prefs.set("theme", next);
     renderThemeToggle();
   });
-  window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", renderThemeToggle);
 
   $("open-sidebar").addEventListener("click", () => setDrawer(true));
   $("backdrop").addEventListener("click", () => closeDrawer(true));

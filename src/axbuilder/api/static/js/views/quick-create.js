@@ -208,7 +208,7 @@ function renderModels() {
       h(
         "span",
         { class: "model-card-body" },
-        h("span", { class: "model-name" }, model.name, model.name === status.fallback ? h("span", { class: "tag", text: "기본 모델" }) : null),
+        h("span", { class: "model-name" }, model.name, model.name === status.fallback ? h("span", { class: "tag", text: "기본" }) : null),
         h("span", { class: "model-meta" }, modelMeta(model).map((part) => h("span", { text: part }))),
       ),
     ),
@@ -216,7 +216,7 @@ function renderModels() {
   const modelError = h("p", { class: "field-error", id: "qc-model-error", hidden: true });
   replace(
     slot,
-    modelHintNotice("모델이 없어도 문서 올리기와 색인은 됩니다. 질문하려면 모델이 있어야 합니다."),
+    modelHintNotice("모델 없이도 만들 수 있습니다. 질문할 때는 모델이 필요합니다."),
     cards.length
       ? h("fieldset", { class: "model-cards", "aria-describedby": "qc-model-error" }, h("legend", { class: "sr-only", text: "답을 쓸 모델" }), cards)
       : null,
@@ -261,7 +261,7 @@ function renderFiles() {
   const good = validFiles();
   const ids = assignDocIds(good.map((entry) => entry.file.name));
   if (!files.length) {
-    replace(slot, h("p", { class: "field-hint wizard-empty", text: "파일 없이 만들 수도 있습니다. 만든 뒤 문서 탭에서 올리면 됩니다." }));
+    replace(slot, h("p", { class: "field-hint wizard-empty", text: "파일은 만든 뒤에 올려도 됩니다." }));
     syncFoot();
     return;
   }
@@ -332,7 +332,7 @@ function renderFiles() {
           },
         },
       }),
-      h("span", { text: "세부 설정: 파일별로 등급 바꾸기" }),
+      h("span", { text: "파일별로 등급 바꾸기" }),
     ),
   );
   syncFoot();
@@ -356,10 +356,10 @@ function syncFoot() {
     return;
   }
   const publicCount = good.filter((entry) => entry.level === "public").length;
-  const levels = publicCount ? `internal ${good.length - publicCount}개, public ${publicCount}개` : "모두 internal 등급";
+  const levels = publicCount ? `internal ${good.length - publicCount}개, public ${publicCount}개` : "모두 internal";
   note.textContent = good.length
-    ? `워크스페이스를 만들고 파일 ${good.length}개(${levels})를 올린 뒤 색인합니다.${skipped ? ` ${skipped}개는 올리지 않습니다.` : ""}`
-    : "파일 없이 워크스페이스만 만듭니다.";
+    ? `파일 ${good.length}개(${levels})를 올리고 색인합니다.${skipped ? ` ${skipped}개는 제외.` : ""}`
+    : "파일 없이 만듭니다.";
 }
 
 function showStep(next, focus) {
@@ -448,7 +448,7 @@ function renderRun(run) {
       ? h(
           "p",
           { class: "progress-text" },
-          "문서를 읽고 검색할 수 있게 만드는 중입니다. 처음에는 임베딩 모델을 불러오느라 더 걸립니다. 경과 ",
+          "처음에는 임베딩 모델을 불러오느라 더 걸립니다. 경과 ",
           h("span", { class: "elapsed", data: { since: run.indexStartedAt }, text: "0초" }),
         )
       : run.indexFailure

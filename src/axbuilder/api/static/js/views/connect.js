@@ -10,6 +10,7 @@ import { currentRole, state } from "../state.js";
 
 const PLACEHOLDER_KEY = "axb_…";
 const QUESTION = "질문을 여기에 적으세요";
+const DATA_DIR_PLACEHOLDER = "<데이터 폴더의 절대 경로>";
 
 function when(value) {
   if (!value) return "";
@@ -51,7 +52,14 @@ function examples(origin, workspaceId, role, key) {
       "console.log(data.answer, data.citations);",
     ].join("\n"),
     mcp: JSON.stringify(
-      { mcpServers: { [`axb-${workspaceId}`]: { command: "axb", args: ["mcp", "--workspace", workspaceId, "--role", role] } } },
+      {
+        mcpServers: {
+          [`axb-${workspaceId}`]: {
+            command: "axb",
+            args: ["mcp", "--data-dir", DATA_DIR_PLACEHOLDER, "--workspace", workspaceId, "--role", role],
+          },
+        },
+      },
       null,
       2,
     ),
@@ -59,10 +67,10 @@ function examples(origin, workspaceId, role, key) {
 }
 
 const EXAMPLE_TABS = [
-  { key: "curl", label: "curl", note: "OpenAI 호환 주소(/v1/chat/completions)를 그대로 부릅니다. Windows PowerShell에서는 curl 대신 curl.exe를 쓰고 따옴표를 맞추세요." },
-  { key: "python", label: "Python", note: "openai 패키지의 base_url만 바꾸면 됩니다(pip install openai). 답변 끝에 출처 목록이 붙고, 인용과 원문은 응답의 axb 필드에 있습니다." },
-  { key: "js", label: "JavaScript", note: "서버나 Node에서 부르는 예시입니다. 다른 사이트의 브라우저 화면에서 직접 부르려면 서버의 AXB_CORS_ORIGINS에 그 사이트 주소를 넣어야 합니다." },
-  { key: "mcp", label: "MCP 설정", note: "Claude Desktop 같은 MCP 클라이언트의 설정 파일에 넣습니다. 이 PC에서 직접 실행하므로 키가 필요 없고, 역할은 설정에 적은 것으로 고정됩니다. pip install -e \".[mcp]\"로 설치해야 합니다." },
+  { key: "curl", label: "curl", note: "OpenAI 호환 주소입니다. PowerShell에서는 curl.exe를 쓰세요." },
+  { key: "python", label: "Python", note: "openai 패키지의 base_url만 바꿉니다. 인용과 원문은 응답의 axb 필드에 있습니다." },
+  { key: "js", label: "JavaScript", note: "다른 사이트의 브라우저 화면에서 직접 부르려면 서버의 AXB_CORS_ORIGINS에 그 사이트 주소를 넣습니다." },
+  { key: "mcp", label: "MCP 설정", note: "--data-dir에는 서버가 쓰는 데이터 폴더(기본은 서버를 띄운 폴더의 data)의 절대 경로를 넣습니다. 먼저 pip install -e \".[mcp]\"가 필요합니다. axb serve가 같은 워크스페이스를 쓰는 동안에는 MCP 쪽 질문이 실패할 수 있습니다(색인은 한 프로세스만 엽니다)." },
 ];
 
 export function createConnectView(workspaceId) {
@@ -88,17 +96,17 @@ export function createConnectView(workspaceId) {
   const form = h(
     "form",
     { class: "key-form", novalidate: true, "aria-labelledby": "key-form-title" },
-    h("h3", { class: "section-title", id: "key-form-title", text: "키 만들기" }),
+    h("h3", { class: "section-title", id: "key-form-title", text: "새 키" }),
     h(
       "div",
       { class: "field-row" },
-      h("div", { class: "field" }, h("label", { for: "key-name", text: "이름" }), nameInput, h("p", { class: "field-hint", text: "어디에서 쓰는 키인지 알아볼 이름." }), nameError),
+      h("div", { class: "field" }, h("label", { for: "key-name", text: "이름" }), nameInput, nameError),
       h(
         "div",
         { class: "field" },
         h("label", { for: "key-role", text: "역할" }),
         roleSelect,
-        h("p", { class: "field-hint", id: "key-role-hint", text: "이 키로 온 질문은 언제나 이 역할로 답합니다. 요청에서 바꿀 수 없습니다." }),
+        h("p", { class: "field-hint", id: "key-role-hint", text: "이 키의 질문은 늘 이 역할로 답합니다." }),
         roleError,
       ),
     ),
@@ -213,7 +221,7 @@ export function createConnectView(workspaceId) {
       return;
     }
     if (!keys.length) {
-      replace(listSlot, h("div", { class: "docs-empty" }, h("p", { class: "gate-title", text: "아직 키가 없습니다" }), h("p", { class: "gate-text", text: "키를 만들면 이 화면 밖의 프로그램에서도 이 어시스턴트에 질문할 수 있습니다. 키가 없으면 밖에서는 아무것도 쓸 수 없습니다." })));
+      replace(listSlot, h("div", { class: "docs-empty" }, h("p", { class: "gate-title", text: "아직 키가 없습니다" }), h("p", { class: "gate-text", text: "키가 있어야 이 화면 밖에서 질문할 수 있습니다." })));
       return;
     }
     replace(
@@ -335,8 +343,8 @@ export function createConnectView(workspaceId) {
         h(
           "div",
           { class: "notice-body" },
-          h("p", { class: "notice-title", text: `방금 만든 키 "${freshKey.name}"(${freshKey.prefix})를 이 화면이 잠깐 기억하고 있습니다` }),
-          h("p", { class: "notice-text", text: "아래 예시를 복사하면 키가 채워져 복사됩니다. 화면에는 보이지 않으며, 다른 워크스페이스로 가거나 새로 고치면 잊습니다." }),
+          h("p", { class: "notice-title", text: `예시를 복사하면 방금 만든 키 "${freshKey.name}"(${freshKey.prefix})가 채워집니다` }),
+          h("p", { class: "notice-text", text: "키는 화면에 보이지 않고, 새로 고치면 잊습니다." }),
         ),
         h("button", { class: "btn", type: "button", on: { click: () => { forget(); nameInput.focus(); } } }, "지금 잊기"),
       ),
@@ -397,10 +405,10 @@ export function createConnectView(workspaceId) {
           h("span", {
             class: "field-hint",
             text: !usesKey
-              ? "키가 들어가지 않는 예시입니다."
+              ? "키 없이 이 PC에서 직접 실행합니다."
               : freshKey
                 ? `복사하면 방금 만든 키(${freshKey.prefix})가 채워집니다.`
-                : `${PLACEHOLDER_KEY} 자리에 키를 넣으세요. 키를 방금 만들었다면 복사할 때 채워 줍니다.`,
+                : `${PLACEHOLDER_KEY} 자리에 키를 넣으세요.`,
           }),
           // 누르는 순간에 만든다: 실제 키는 화면에 두지 않고 복사할 때만 넣는다
           copyButton(() => examples(origin, workspaceId, role, freshKey ? freshKey.key : PLACEHOLDER_KEY)[tab.key], "예시 복사"),
@@ -423,25 +431,24 @@ export function createConnectView(workspaceId) {
       h(
         "div",
         { class: "connect-intro" },
-        h("h2", { class: "section-title", text: "다른 곳에서 이 어시스턴트 쓰기" }),
-        h("p", { class: "gate-text", text: "사내 포털, 메신저 봇, 스크립트처럼 이 화면 밖의 프로그램이 질문하려면 키가 필요합니다. 키 하나는 이 워크스페이스의 역할 하나에 묶이고, 그 역할이 볼 수 있는 문서에서만 답합니다." }),
+        h("h2", { class: "section-title", text: "다른 프로그램에서 쓰기" }),
+        h("p", { class: "gate-text", text: "키 하나는 역할 하나에 묶이고, 그 역할이 볼 수 있는 문서에서만 답합니다." }),
       ),
       listSlot,
       form,
       freshSlot,
-      h("div", { class: "connect-examples" }, h("h3", { class: "section-title", text: "복사해 쓰는 예시" }), exampleSlot),
+      h("div", { class: "connect-examples" }, h("h3", { class: "section-title", text: "예시" }), exampleSlot),
       h(
         "div",
         { class: "connect-remote" },
         h("h3", { class: "section-title", text: "다른 PC에서 쓰려면" }),
-        h("p", { class: "gate-text", text: "기본 실행(axb serve)은 이 PC에서만 접속됩니다. 다른 PC에서 부르려면 서버를 바깥 주소로 띄우고, 접속에 쓸 이름이나 IP를 허용 목록에 넣습니다." }),
-        h("pre", { class: "code" }, h("code", { text: "AXB_ALLOWED_HOSTS=127.0.0.1,localhost,<이 PC의 IP 또는 이름>\nuvicorn axbuilder.api.main:app --host 0.0.0.0 --port 8000" })),
+        h("p", { class: "gate-text", text: "서버를 바깥 주소로 띄우고, 접속에 쓸 이름이나 IP를 허용 목록에 넣습니다." }),
+        h("pre", { class: "code" }, h("code", { text: "AXB_ALLOWED_HOSTS=127.0.0.1,localhost,<이 PC의 IP 또는 이름> axb serve --host 0.0.0.0" })),
         h(
           "ul",
           { class: "plain-list" },
-          h("li", { text: "그래도 다른 PC에서는 키로 /v1/ 주소만 쓸 수 있습니다. 이 화면과 워크스페이스 만들기, 문서 올리기, 색인, 키 발급은 이 PC에서만 열립니다." }),
-          h("li", { text: "예시의 주소는 지금 이 화면의 주소입니다. 다른 PC에서는 이 PC의 IP나 이름으로 바꿔 쓰세요." }),
-          h("li", { text: "키는 비밀번호처럼 다루세요. 새어 나갔으면 폐기하고 새로 만듭니다." }),
+          h("li", { text: "다른 PC에서는 키로 /v1/ 주소만 쓸 수 있습니다. 이 화면과 관리 기능은 이 PC에서만 열립니다." }),
+          h("li", { text: "예시의 주소는 이 PC의 IP나 이름으로 바꿔 쓰세요. PowerShell에서는 환경 변수를 $env:AXB_ALLOWED_HOSTS로 먼저 정합니다." }),
         ),
       ),
     ),
