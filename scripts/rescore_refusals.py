@@ -9,6 +9,9 @@
 거절한 답은 고정 문구로 바뀌어 있고(→ EXACT) 그 밖의 답은 인용 번호만 다시 매긴 모델 원문이다.
 판정은 인용 표시를 지우고 하므로 번호가 달라도 결과는 같아야 한다. 보고서에 모델 원문
 (`raw_answer` 또는 `llm.text`)이 있으면 그것으로도 판정해 두 결과가 다른 문항을 알려 준다.
+
+지표도 두 가지로 낸다. 기존 지표는 "범위 밖 문항이면 거절이 정답"이고, 근거 기준 지표는
+"검색 상위 k에 라벨된 근거가 하나도 없으면 거절이 정답"이다(문항의 recall_at_k > 0으로 정한다).
 """
 
 import argparse
@@ -17,7 +20,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from axbuilder.eval.metrics import refusal_correct
+from axbuilder.eval.metrics import grounded_refusal_correct, refusal_correct
 from axbuilder.generation.refusal import RefusalKind, classify_refusal
 
 OUT_OF_SCOPE = "out_of_scope"
@@ -51,6 +54,8 @@ def rescore(report: dict[str, Any]) -> dict[str, Any]:
                 "raw_agrees": None if raw is None else classify_refusal(raw) is kind,
                 # 검색이 근거를 하나도 못 가져온 문항인가 (범위 밖 문항은 근거가 없어 None)
                 "retrieval_miss": item.get("recall_at_k") == 0,
+                # 상위 k에 라벨된 근거가 하나라도 있는가 (eval.run._record와 같은 규칙)
+                "evidence_in_context": bool(item.get("recall_at_k")),
             }
         )
     return {"rows": rows, "config": report.get("config", {})}
@@ -102,6 +107,37 @@ def format_rescore(name: str, result: dict[str, Any]) -> str:
             f"| 답해야 하는 문항을 거절: {label} | {len(before)}/{len(group)} ({_ids(before)}) "
             f"| {len(after)}/{len(group)} ({_ids(after)}) |"
         )
+
+    # 판정(strict / 새 판정)과 지표 정의(범위 밖 기준 / 근거 기준)를 따로 바꿔 본다
+    lines += ["", "| 판정 | 지표 | 거절 정확도 | 오답 |", "|---|---|---|---|"]
+    for verdict, key, metric, grounded in [
+        ("strict (EXACT만)", "before", "기존: 범위 밖이면 거절", False),
+        ("새 판정", "after", "기존: 범위 밖이면 거절", False),
+        ("새 판정", "after", "근거 기준: 상위 k에 근거가 없으면 거절", True),
+    ]:
+        wrong = [
+            r
+            for r in rows
+            if not (
+                grounded_refusal_correct(r[key], r["evidence_in_context"])
+                if grounded
+                else refusal_correct(r[key], r["qtype"])
+            )
+        ]
+        lines.append(
+            f"| {verdict} | {metric} | {1 - len(wrong) / len(rows):.3f} "
+            f"| {len(wrong)} ({_ids(wrong)}) |"
+        )
+    lines.append("")
+    for label, in_context, refused in [
+        ("근거가 있는데 거절(over_refusals)", True, True),
+        ("근거가 없어서 거절(grounded_refusals)", False, True),
+        ("근거가 없는데 답함(ungrounded_answers)", False, False),
+    ]:
+        group = [
+            r for r in rows if r["evidence_in_context"] == in_context and r["after"] == refused
+        ]
+        lines.append(f"- 새 판정에서 {label}: {len(group)} ({_ids(group)})")
 
     kinds = {kind: [r for r in rows if r["kind"] is kind] for kind in RefusalKind}
     lines += [

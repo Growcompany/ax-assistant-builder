@@ -56,6 +56,9 @@ def test_rescore_before_is_the_stored_rule_and_after_adds_paraphrases():
     assert all(r["stored_agrees"] and r["raw_agrees"] for r in rows.values())
     assert rows["bank-003"]["retrieval_miss"] is True
     assert rows["bank-045"]["retrieval_miss"] is False
+    # 근거가 상위 k에 있었나: 001·002만. 검색 실패(003)와 범위 밖(045, 048)은 없다
+    in_context = [rows[i]["evidence_in_context"] for i in sorted(rows)]
+    assert in_context == [True, True, False, False, False]
 
 
 def test_format_rescore_table():
@@ -74,6 +77,13 @@ def test_format_rescore_table():
         "| 답해야 하는 문항을 거절: 검색이 근거를 못 가져와 거절 | 0/1 (-) | 1/1 (003) |"
     ) in lines
     assert "- 판정: EXACT 2, PARAPHRASE 2 (003, 045), NONE 1" in lines
+    # 판정과 지표 정의를 따로 바꾼 세 줄
+    assert "| strict (EXACT만) | 기존: 범위 밖이면 거절 | 0.600 | 2 (002, 045) |" in lines
+    assert "| 새 판정 | 기존: 범위 밖이면 거절 | 0.600 | 2 (002, 003) |" in lines
+    assert "| 새 판정 | 근거 기준: 상위 k에 근거가 없으면 거절 | 0.800 | 1 (002) |" in lines
+    assert "- 새 판정에서 근거가 있는데 거절(over_refusals): 1 (002)" in lines
+    assert "- 새 판정에서 근거가 없어서 거절(grounded_refusals): 3 (003, 045, 048)" in lines
+    assert "- 새 판정에서 근거가 없는데 답함(ungrounded_answers): 0 (-)" in lines
     assert "- `answer`와 모델 원문의 판정이 다른 문항: 0/5" in lines
 
 
@@ -109,3 +119,11 @@ def test_cli_retrieval_only_report_and_missing_file(tmp_path, capsys):
     assert "답변이 있는 항목이 없다" in capsys.readouterr().out
     assert rescore_refusals.main([str(tmp_path / "none.json")]) == 1
     assert "cannot read" in capsys.readouterr().err
+
+
+def test_partial_recall_counts_as_evidence_in_context():
+    row = item("bank-040", "multi_doc", REFUSAL_TEXT, True, 0.5, REFUSAL_TEXT)
+    result = rescore_refusals.rescore({"items": [row]})
+    assert result["rows"][0]["evidence_in_context"] is True
+    text = rescore_refusals.format_rescore("x", result)
+    assert "- 새 판정에서 근거가 있는데 거절(over_refusals): 1 (040)" in text
