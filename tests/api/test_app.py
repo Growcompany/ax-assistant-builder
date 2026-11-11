@@ -99,6 +99,9 @@ def llm() -> RecordingLLM:
 def open_client(settings: Settings, llm, embedder=None, **kwargs) -> TestClient:
     app = create_app(settings, llm=llm, embedder=embedder or HashEmbedder())
     # Host 허용 목록 때문에 실제 사용처럼 127.0.0.1로 부른다 (TestClient 기본값은 testserver)
+    # 관리 API와 화면은 이 PC(loopback)에서 온 요청만 받는다. TestClient의 기본 클라이언트 주소
+    # ("testclient")는 loopback이 아니라서 주소도 맞춘다
+    kwargs.setdefault("client", ("127.0.0.1", 50000))
     return TestClient(app, base_url="http://127.0.0.1", **kwargs)
 
 

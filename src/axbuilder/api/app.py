@@ -10,6 +10,7 @@ create_app(settings, llm=None, embedder=None)이 앱을 만든다. 테스트는 
   index/qdrant/                dense 색인 (Qdrant 로컬 모드 파일)
   index/index.json             색인 정보(임베더, 차원, 청크 수, 색인에 든 doc_id 목록).
                                색인을 다 만든 뒤에 쓴다
+  keys.json                    API 키의 해시(원문 없음). axbuilder.api.keys
 
 색인은 워크스페이스별로 메모리에 캐시한다. 서버를 다시 켜면 그 워크스페이스에 처음 질문할 때
 index/의 Qdrant 색인을 열고, 그 안의 청크로 BM25를 다시 만든다(임베딩은 다시 계산하지 않는다).
@@ -23,6 +24,16 @@ LLM은 워크스페이스마다 고를 수 있다(workspace.yaml의 llm_model, �
 모델 이름별로 하나씩 만들어 다시 쓴다. cloud 모드에서는 워크스페이스 설정과 무관하게 설정된 Claude
 모델만 쓴다. create_app에 llm을 주면(테스트) 모든 모델에 그것을 쓰고, llm_factory를 주면 모델
 이름으로 클라이언트를 만든다.
+
+접근 규칙(미들웨어, 바깥 → 안):
+  _RejectForeignHost   Host가 허용 목록에 없으면 403 (모든 경로)
+  AccessRules          이 PC(loopback) 밖에서 온 요청은 /v1/* 만. /v1/* 는 API 키가 없으면 401
+  _RejectCrossSite     다른 출처의 Origin, cross-site 상태 변경 요청은 403. 유효한 키가 있는
+                       /v1/* 요청은 건너뛴다(키가 인증이다)
+  _BodySizeLimit       본문 상한
+  _UISecurityHeaders   화면 응답의 CSP 등
+이 PC에서 온 요청의 역할은 요청이 정하고(/workspaces/{id}/ask), 키로 온 요청의 역할은 키가 정한다
+(/v1/*, axbuilder.api.v1).
 """
 
 import functools
@@ -45,6 +56,11 @@ from typing import Annotated, Any, BinaryIO, Literal
 
 import httpx
 from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi.exception_handlers import (
+    http_exception_handler,
+    request_validation_exception_handler,
+)
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import (
@@ -56,7 +72,12 @@ from pydantic import (
     field_validator,
 )
 from starlette.datastructures import MutableHeaders
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.responses import Response
 
+from axbuilder.api import v1
+from axbuilder.api.access import KEY_SCOPE, AccessRules, is_v1_path, openai_error
+from axbuilder.api.keys import KeyStore
 from axbuilder.corpus import DOC_ID, load_sources, source_file
 from axbuilder.generation.answer import answer
 from axbuilder.generation.llm import (
@@ -72,7 +93,7 @@ from axbuilder.generation.llm import (
 )
 from axbuilder.ingest.chunking import chunk_document
 from axbuilder.ingest.loaders import DocumentTooLargeError, load_document
-from axbuilder.models import Chunk, Citation, DocMeta, ScoredChunk
+from axbuilder.models import Chunk, Citation, DocMeta, LLMResponse, ScoredChunk
 from axbuilder.retrieval.bm25 import BM25Index
 from axbuilder.retrieval.dense import DenseIndex, Embedder
 from axbuilder.retrieval.hybrid import HybridRetriever
@@ -95,6 +116,9 @@ MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 파일 하나의 상한 (실제로 읽은
 UPLOAD_OVERHEAD_BYTES = 1024 * 1024
 # 업로드가 아닌 요청(JSON) 본문의 상한. 질문은 2000자, 워크스페이스 설정도 몇 KB면 된다
 MAX_JSON_BYTES = 64 * 1024
+# /v1/* 본문의 상한. 채팅 클라이언트는 이전 대화를 통째로 보낸다(쓰는 것은 마지막 user 메시지뿐).
+# 키가 있는 요청만 여기까지 온다
+MAX_V1_BYTES = 1024 * 1024
 READ_CHUNK_BYTES = 1024 * 1024
 SUPPORTED_SUFFIXES = (".pdf", ".hwpx", ".txt", ".md")  # load_document가 읽는 형식
 # 규격(ISO 32000)은 %PDF- 머리글을 첫 줄에 두라고 하지만, Adobe Reader는 앞 1024바이트 안이면
@@ -418,6 +442,7 @@ class _Service:
         ollama_transport: httpx.BaseTransport | None = None,
     ):
         self.store = WorkspaceStore(settings.data_dir / "workspaces")
+        self.keys = KeyStore(self.store)
         self._cloud = settings.llm_mode == "cloud"
         self._ollama_url = settings.ollama_url
         self._ollama_transport = ollama_transport
@@ -877,27 +902,33 @@ class _Service:
         for workspace_id in workspace_ids:
             with self.lock(workspace_id):
                 self._drop_locked(workspace_id)
+        self.keys.flush()  # 아직 쓰지 않은 "마지막 사용 시각"
 
     # ---- 질문 ----
 
     def ask(self, ws: Workspace, request: AskRequest) -> AskResponse:
-        # 역할은 요청이 정한다: M-1은 인증이 없고 서버를 127.0.0.1에만 띄운다. 역할 필터는 인증이
-        # 아니다. 실제 배포에서는 인증 토큰의 클레임으로 역할을 정하고, 검색 단계 필터는 그대로
-        # 둔다(M-3)
+        # 이 경로(관리 API)는 이 PC에서 온 요청만 닿는다: 역할을 요청이 정한다. 역할 필터는 인증이
+        # 아니다. 밖에서 오는 요청은 API 키가 역할을 정한다(/v1/*, axbuilder.api.v1)
         if request.role not in ws.roles:
             raise HTTPException(
                 400, f"알 수 없는 역할입니다. 가능한 역할: {', '.join(ws.roles) or '(없음)'}"
             )
+        response, _ = self.answer_with_usage(ws, request.question, request.role)
+        return response
+
+    def answer_with_usage(
+        self, ws: Workspace, question: str, role: str
+    ) -> tuple[AskResponse, LLMResponse | None]:
+        """(응답, LLM 원문 응답). role은 부르는 쪽이 이미 정한 값이다(요청 또는 키).
+        LLM 응답은 토큰 수를 알려 주려고 함께 돌려준다. LLM을 부르지 않았으면 None."""
         started = time.perf_counter()
         # 권한 필터(역할 → 접근 등급)는 answer()가 검색 단계에서 건다. 볼 수 없는 문서는
         # 검색 결과에도, LLM 프롬프트에도 들어가지 않는다
-        result = answer(
-            request.question, _WorkspaceRetriever(self, ws.id), self.llm_for(ws), ws, request.role
-        )
+        result = answer(question, _WorkspaceRetriever(self, ws.id), self.llm_for(ws), ws, role)
         # 원문은 이 질문에서 이 역할로 검색된 청크(result.retrieved)에서만 찾는다. 색인 전체에서
         # chunk_id로 찾지 않는다: 권한 밖 문서의 본문이 나갈 길을 만들지 않는다
         texts = {scored.chunk.chunk_id: scored.chunk.text for scored in result.retrieved}
-        return AskResponse(
+        response = AskResponse(
             answer=result.text,
             citations=result.citations,
             refused=result.refused,
@@ -908,6 +939,7 @@ class _Service:
             ],
             model=result.llm.model if result.llm is not None else self.model_name(ws),
         )
+        return response, result.llm
 
 
 class _WorkspaceRetriever:
@@ -938,17 +970,22 @@ class _BodySizeLimit:
     FastAPI가 본문을 읽다 받은 그대로 다시 던져 413 응답이 된다.
     """
 
-    def __init__(self, app: Any, upload_bytes: int, other_bytes: int) -> None:
+    def __init__(self, app: Any, upload_bytes: int, other_bytes: int, v1_bytes: int) -> None:
         self.app = app
         self.upload_bytes = upload_bytes
         self.other_bytes = other_bytes
+        self.v1_bytes = v1_bytes
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
-        upload = _UPLOAD_PATH.fullmatch(scope["path"]) is not None
-        max_bytes = self.upload_bytes if upload else self.other_bytes
+        if _UPLOAD_PATH.fullmatch(scope["path"]) is not None:
+            max_bytes = self.upload_bytes
+        elif is_v1_path(scope["path"]):
+            max_bytes = self.v1_bytes
+        else:
+            max_bytes = self.other_bytes
         received = 0
 
         async def limited_receive() -> Any:
@@ -1001,14 +1038,31 @@ class _RejectCrossSite:
     붙이고 페이지 스크립트는 이 값을 바꿀 수 없다. same-site도 막는다: 사이트는 포트를 보지 않아
     다른 포트의 로컬 개발 서버(localhost:3000) 페이지도 same-site다. same-origin(/docs), none
     (주소창 직접 입력), 머리글 없음(curl·httpx 같은 브라우저 밖 클라이언트)만 통과한다.
-    정식 인증은 M-3.
+
+    Origin 머리글이 있으면 GET을 포함한 모든 요청에서 그 호스트가 허용 목록에 있어야 한다.
+    Sec-Fetch-Site를 보내지 않는 구형 브라우저 대비다. 호스트만 본다(포트는 보지 않는다): 다른
+    포트의 로컬 페이지는 최신 브라우저에서 Sec-Fetch-Site(same-site)로 막힌다.
+
+    유효한 API 키로 온 /v1/* 요청(AccessRules가 scope에 표시)은 두 검사를 건너뛴다. 키는 페이지
+    스크립트가 훔쳐 쓸 수 없는 인증이고(쿠키처럼 브라우저가 알아서 붙이지 않는다), 다른 출처의
+    페이지에서 쓰라고 만든 길이다.
     """
 
-    def __init__(self, app: Any) -> None:
+    def __init__(self, app: Any, allowed_hosts: tuple[str, ...]) -> None:
         self.app = app
+        self.allowed_hosts = frozenset(host.lower() for host in allowed_hosts)
 
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
-        if scope["type"] == "http" and scope["method"] not in ("GET", "HEAD", "OPTIONS"):
+        if scope["type"] in ("http", "websocket") and scope.get(KEY_SCOPE) is None:
+            origins = [value for name, value in scope["headers"] if name == b"origin"]
+            if origins and not _header_host_allowed(_ORIGIN_HEADER, origins, self.allowed_hosts):
+                await _reject_host_or_origin(scope, receive, send)
+                return
+        if (
+            scope["type"] == "http"
+            and scope.get(KEY_SCOPE) is None
+            and scope["method"] not in ("GET", "HEAD", "OPTIONS")
+        ):
             site = dict(scope["headers"]).get(b"sec-fetch-site")
             if site not in _ALLOWED_FETCH_SITES:
                 response = JSONResponse(
@@ -1020,49 +1074,65 @@ class _RejectCrossSite:
         await self.app(scope, receive, send)
 
 
+def _header_host_allowed(
+    pattern: re.Pattern[str], values: list[bytes], allowed_hosts: frozenset[str]
+) -> bool:
+    if len(values) != 1:  # 없거나 여러 개: 어느 것을 믿을지 정하지 않고 거절한다
+        return False
+    match = pattern.fullmatch(values[0].decode("latin-1"))
+    return match is not None and match.group(1).lower() in allowed_hosts
+
+
+async def _reject_host_or_origin(scope: Any, receive: Any, send: Any) -> None:
+    if scope["type"] == "websocket":  # 지금은 websocket 경로가 없다. 생겨도 막히게
+        await send({"type": "websocket.close", "code": 1008})
+        return
+    # 받은 Host·Origin 값은 응답에 되돌려 주지 않는다
+    response = JSONResponse(
+        status_code=403,
+        content={
+            "detail": "허용하지 않는 Host 또는 Origin입니다. 서버 주소"
+            "(127.0.0.1·localhost)로 접속하거나 AXB_ALLOWED_HOSTS를 확인하세요"
+        },
+    )
+    await response(scope, receive, send)
+
+
 class _RejectForeignHost:
-    """Host 머리글(있으면 Origin도)의 호스트가 허용 목록에 없으면 GET을 포함한 모든 요청을 403.
+    """Host 머리글의 호스트가 허용 목록에 없으면 GET을 포함한 모든 요청을 403 (/v1/* 포함).
 
     DNS 리바인딩 방어다. 공격자가 자기 도메인(attacker.example)의 DNS 응답을 127.0.0.1로 바꾸면,
     그 페이지의 스크립트에게 이 서버는 "같은 출처"가 된다: Sec-Fetch-Site가 same-origin이라
     _RejectCrossSite를 통과하고, CORS 없이 응답(내부 문서로 만든 답)도 읽는다. 이때도 브라우저가
     보내는 Host는 공격자 도메인 그대로이므로, 서버가 자기 이름이 아닌 Host를 거절하면 막힌다.
 
-    Origin은 Sec-Fetch-Site를 보내지 않는 구형 브라우저 대비다. 호스트만 본다(포트는 보지 않는다):
-    다른 포트의 로컬 페이지는 최신 브라우저에서 _RejectCrossSite(same-site)가 막는다.
+    Origin 머리글의 검사는 _RejectCrossSite가 한다(유효한 키가 있는 /v1/* 요청은 건너뛰어야 해서
+    키를 확인하는 AccessRules보다 안쪽에 있다).
     """
 
     def __init__(self, app: Any, allowed_hosts: tuple[str, ...]) -> None:
         self.app = app
         self.allowed_hosts = frozenset(host.lower() for host in allowed_hosts)
 
-    def _allowed(self, pattern: re.Pattern[str], values: list[bytes]) -> bool:
-        if len(values) != 1:  # 없거나 여러 개: 어느 것을 믿을지 정하지 않고 거절한다
-            return False
-        match = pattern.fullmatch(values[0].decode("latin-1"))
-        return match is not None and match.group(1).lower() in self.allowed_hosts
-
     async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
         if scope["type"] in ("http", "websocket"):
             hosts = [value for name, value in scope["headers"] if name == b"host"]
-            origins = [value for name, value in scope["headers"] if name == b"origin"]
-            if not self._allowed(_HOST_HEADER, hosts) or (
-                origins and not self._allowed(_ORIGIN_HEADER, origins)
-            ):
-                if scope["type"] == "websocket":  # 지금은 websocket 경로가 없다. 생겨도 막히게
-                    await send({"type": "websocket.close", "code": 1008})
-                    return
-                # 받은 Host·Origin 값은 응답에 되돌려 주지 않는다
-                response = JSONResponse(
-                    status_code=403,
-                    content={
-                        "detail": "허용하지 않는 Host 또는 Origin입니다. 서버 주소"
-                        "(127.0.0.1·localhost)로 접속하거나 AXB_ALLOWED_HOSTS를 확인하세요"
-                    },
-                )
-                await response(scope, receive, send)
+            if not _header_host_allowed(_HOST_HEADER, hosts, self.allowed_hosts):
+                await _reject_host_or_origin(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+
+def create_service(
+    settings: Settings,
+    llm: LLMClient | None = None,
+    embedder: Embedder | None = None,
+    *,
+    llm_factory: Callable[[str], LLMClient] | None = None,
+    ollama_transport: httpx.BaseTransport | None = None,
+) -> _Service:
+    """HTTP 없이 같은 서비스 계층을 쓴다(MCP 서버). 인자는 create_app과 같다. 다 쓰면 close()."""
+    return _Service(settings, llm, embedder, llm_factory, ollama_transport)
 
 
 def create_app(
@@ -1096,35 +1166,60 @@ def create_app(
         _BodySizeLimit,
         upload_bytes=MAX_UPLOAD_BYTES + UPLOAD_OVERHEAD_BYTES,
         other_bytes=MAX_JSON_BYTES,
+        v1_bytes=MAX_V1_BYTES,
     )
-    app.add_middleware(_RejectCrossSite)
-    # 마지막에 더한 것이 바깥: 본문을 읽기 전에, 다른 검사보다 먼저 거른다
+    # 마지막에 더한 것이 바깥이다. 순서(바깥 → 안): Host → 접근 규칙(loopback, 키) → Origin·
+    # Sec-Fetch-Site → 본문 상한. 본문을 읽기 전에 모두 거른다
+    app.add_middleware(_RejectCrossSite, allowed_hosts=settings.allowed_hosts)
+    app.add_middleware(AccessRules, keys=service.keys, cors_origins=settings.cors_origins)
     app.add_middleware(_RejectForeignHost, allowed_hosts=settings.allowed_hosts)
+
+    def error(request: Request, status_code: int, detail: str, code: str) -> JSONResponse:
+        """/v1/* 는 OpenAI 오류 모양, 그 밖은 {"detail": …}."""
+        if is_v1_path(request.url.path):
+            return openai_error(status_code, detail, code)
+        return JSONResponse(status_code=status_code, content={"detail": detail})
 
     @app.exception_handler(LLMUnavailableError)
     async def _llm_unavailable(request: Request, exc: LLMUnavailableError) -> JSONResponse:
         logger.warning("LLM unavailable: %s", exc)
         detail = "LLM을 사용할 수 없습니다: " + _public_message(str(exc))
-        return JSONResponse(status_code=503, content={"detail": detail})
+        return error(request, 503, detail, "llm_unavailable")
 
     @app.exception_handler(EmbedderUnavailableError)
     async def _embedder_unavailable(
         request: Request, exc: EmbedderUnavailableError
     ) -> JSONResponse:
-        return JSONResponse(status_code=503, content={"detail": _public_message(str(exc))})
+        return error(request, 503, _public_message(str(exc)), "embedder_unavailable")
 
     @app.exception_handler(IndexNotReadyError)
     async def _index_not_ready(request: Request, exc: IndexNotReadyError) -> JSONResponse:
-        return JSONResponse(status_code=409, content={"detail": str(exc)})
+        return error(request, 409, str(exc), "index_not_ready")
 
     @app.exception_handler(Exception)
     async def _internal_error(request: Request, exc: Exception) -> JSONResponse:
         # 스택 트레이스·내부 경로는 서버 로그에만 남기고 응답에는 넣지 않는다
         logger.error("unhandled error on %s %s", request.method, request.url.path, exc_info=exc)
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "서버 내부 오류가 발생했습니다. 서버 로그를 확인하세요"},
+        detail = "서버 내부 오류가 발생했습니다. 서버 로그를 확인하세요"
+        return error(request, 500, detail, "internal_error")
+
+    @app.exception_handler(StarletteHTTPException)
+    async def _http_error(request: Request, exc: StarletteHTTPException) -> Response:
+        if not is_v1_path(request.url.path):
+            return await http_exception_handler(request, exc)
+        return openai_error(
+            exc.status_code, str(exc.detail), getattr(exc, "code", None), exc.headers
         )
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_error(request: Request, exc: RequestValidationError) -> Response:
+        if not is_v1_path(request.url.path):
+            return await request_validation_exception_handler(request, exc)
+        # OpenAI 클라이언트는 요청 오류를 400으로 안다. 받은 값은 되돌려 주지 않는다
+        first = exc.errors()[0] if exc.errors() else {}
+        where = ".".join(str(part) for part in first.get("loc", ()) if part != "body")
+        message = str(first.get("msg", "invalid request"))
+        return openai_error(400, f"{where}: {message}" if where else message, "invalid_request")
 
     @app.get("/health")
     def health() -> dict[str, str]:
@@ -1181,6 +1276,8 @@ def create_app(
     def ask(workspace_id: str, request: AskRequest) -> AskResponse:
         ws = service.workspace(workspace_id)
         return service.ask(ws, request)
+
+    v1.add_routes(app, service)
 
     # 경로 조작("..", 절대 경로)은 StaticFiles가 폴더 밖이면 404로 막는다. 폴더가 아직 없어도
     # 앱은 뜬다(그때는 404)

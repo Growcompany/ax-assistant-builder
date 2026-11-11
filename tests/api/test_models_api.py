@@ -20,6 +20,7 @@ from axbuilder.settings import Settings
 from axbuilder.workspace import Workspace, WorkspaceStore
 
 DEFAULT_MODEL = Settings().local_model
+LOOPBACK = ("127.0.0.1", 50000)  # 관리 API는 이 PC에서 온 요청만 받는다
 TAGS = {
     "models": [
         {
@@ -63,7 +64,7 @@ def open_client(settings: Settings, **kwargs) -> TestClient:
     kwargs.setdefault("embedder", HashEmbedder())
     if "llm" not in kwargs and "llm_factory" not in kwargs:
         kwargs["llm"] = RecordingLLM("내용 [1].")
-    return TestClient(create_app(settings, **kwargs), base_url="http://127.0.0.1")
+    return TestClient(create_app(settings, **kwargs), base_url="http://127.0.0.1", client=LOOPBACK)
 
 
 class NamedLLM:
@@ -537,7 +538,7 @@ def test_default_factory_makes_ollama_clients_per_model_with_same_options(settin
     # 주입 없이(실행 때와 같은 경로) 워크스페이스 모델로 Ollama를 부른다. 옵션은 기본 모델과 같다
     seen: list[dict] = []
     app = create_app(settings, embedder=HashEmbedder(), ollama_transport=chat_transport(seen))
-    with TestClient(app, base_url="http://127.0.0.1") as client:
+    with TestClient(app, base_url="http://127.0.0.1", client=LOOPBACK) as client:
         setup_indexed(client)
         assert ask(client).json()["model"] == DEFAULT_MODEL
         assert (
@@ -555,7 +556,7 @@ def test_ask_with_model_missing_in_ollama_503_tells_how_to_pull(settings):
     seen: list[dict] = []
     transport = chat_transport(seen, missing={"exaone:7.8b"})
     app = create_app(settings, embedder=HashEmbedder(), ollama_transport=transport)
-    with TestClient(app, base_url="http://127.0.0.1") as client:
+    with TestClient(app, base_url="http://127.0.0.1", client=LOOPBACK) as client:
         setup_indexed(client)
         assert (
             client.patch("/workspaces/bank", json={"llm_model": "exaone:7.8b"}).status_code == 200
@@ -572,7 +573,7 @@ def test_ask_with_model_missing_in_ollama_503_tells_how_to_pull(settings):
 def test_ask_when_ollama_is_down_503(settings):
     transport = raising_transport(httpx.ConnectError("connection refused"))
     app = create_app(settings, embedder=HashEmbedder(), ollama_transport=transport)
-    with TestClient(app, base_url="http://127.0.0.1") as client:
+    with TestClient(app, base_url="http://127.0.0.1", client=LOOPBACK) as client:
         setup_indexed(client)
         r = ask(client)
     assert r.status_code == 503 and "ollama serve" in r.json()["detail"]

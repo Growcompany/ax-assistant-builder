@@ -17,11 +17,16 @@ ENV_VARS = {
     "claude_model": "AXB_CLAUDE_MODEL",
     "embed_model": "AXB_EMBED_MODEL",
     "allowed_hosts": "AXB_ALLOWED_HOSTS",
+    "cors_origins": "AXB_CORS_ORIGINS",
 }
 
 DEFAULT_ALLOWED_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 # 호스트 이름·IPv4, 또는 대괄호로 싼 IPv6. 포트·스킴·경로는 받지 않는다
 _HOST_NAME = re.compile(r"\[[0-9a-f:.]+\]|[a-z0-9]([a-z0-9.-]*[a-z0-9])?")
+# 브라우저가 보내는 Origin 머리글 모양 그대로: 스킴://호스트[:포트]. 경로·계정 정보·"*"는 없다
+_ORIGIN = re.compile(
+    r"https?://(?:\[[0-9a-f:.]+\]|[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?)(?::([0-9]{1,5}))?"
+)
 
 
 class Settings(BaseModel):
@@ -37,6 +42,26 @@ class Settings(BaseModel):
     # API가 받아 주는 Host 머리글의 호스트 이름(포트는 무엇이든). 환경변수는 쉼표로 구분하고,
     # 주면 기본 목록을 대신한다. DNS 리바인딩 방어라 "*" 같은 와일드카드는 없다
     allowed_hosts: tuple[str, ...] = DEFAULT_ALLOWED_HOSTS
+    # /v1/* 응답에 CORS 머리글을 달아 줄 출처(브라우저에서 직접 부르는 페이지). 환경변수는 쉼표로
+    # 구분한다. 기본은 빈 값(꺼짐). 정확히 일치하는 출처에만 달고 와일드카드는 없다
+    cors_origins: tuple[str, ...] = ()
+
+    @field_validator("cors_origins", mode="before")
+    @classmethod
+    def _parse_cors_origins(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            value = value.split(",")
+        if not isinstance(value, (list, tuple)):
+            return value
+        origins = tuple(str(item).strip().lower() for item in value if str(item).strip())
+        for origin in origins:
+            match = _ORIGIN.fullmatch(origin)
+            if match is None or (match.group(1) and int(match.group(1)) > 65535):
+                raise ValueError(
+                    f"cors_origins entry {origin!r} must be an origin such as "
+                    "https://app.example.com or http://localhost:3000 (no path, no wildcard)"
+                )
+        return origins
 
     @field_validator("allowed_hosts", mode="before")
     @classmethod

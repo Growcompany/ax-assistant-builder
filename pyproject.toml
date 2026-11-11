@@ -28,6 +28,10 @@ dev = [
 ml = [
     "sentence-transformers",
 ]
+# MCP 서버(axb mcp)용. 기본 설치와 단위 테스트는 이것 없이 돈다
+mcp = [
+    "mcp",
+]
 
 [project.scripts]
 axb = "axbuilder.cli:main"
