@@ -51,3 +51,18 @@ def citation_precision(citations: list[Citation], evidence: list[Evidence]) -> f
 def refusal_correct(refused: bool, qtype: str) -> bool:
     """범위 밖 질문은 거절해야 맞고, 그 밖의 질문은 답해야 맞다."""
     return refused == (qtype == "out_of_scope")
+
+
+def grounded_refusal_correct(refused: bool, evidence_in_context: bool) -> bool:
+    """프롬프트에 넣은 자료에 정답 근거가 있으면 답해야 맞고, 없으면 거절해야 맞다.
+
+    refusal_correct는 검색이 근거를 못 가져와 모델이 거절한 것(받은 자료로는 옳은 행동)도
+    오답으로 센다. 이 지표는 검색 실패와 생성 실패를 가른다: 근거가 없어서 거절한 것은 정답,
+    근거가 있는데 거절한 것(과잉 거절)과 근거가 없는데 답한 것(환각 위험)은 오답이다.
+
+    evidence_in_context = 상위 k개 청크에 라벨된 근거가 하나라도 있다(recall_at_k > 0).
+    근거가 둘인 문항에서 하나만 들어와도 "있음"이다: 받은 근거로 일부라도 답할 수 있어서다.
+    범위 밖 문항은 근거가 없으므로 늘 False다. 라벨 기준이라, 라벨에 없는 청크(대체 근거)로
+    답할 수 있었던 문항은 "없음"으로 잘못 분류될 수 있다. 답의 내용이 맞았는지는 보지 않는다.
+    """
+    return refused != evidence_in_context

@@ -174,6 +174,11 @@ def test_with_llm_scores_answers_on_every_item(fake_retriever):
         "citation_precision": 0.0,
         "refusal_accuracy": 0.0,
         "refusal_accuracy_strict": 0.0,  # Task 20에서 더한 지표
+        # 근거 기준 지표와 내역(Task 20): 근거가 없는데(범위 밖) 답했다
+        "grounded_refusal_accuracy": 0.0,
+        "over_refusals": 0,
+        "grounded_refusals": 0,
+        "ungrounded_answers": 1,
     }
     oos = report.items[2]
     assert oos["refused"] is False and oos["refusal_correct"] is False
@@ -217,9 +222,13 @@ def test_paraphrased_refusal_counts_as_refusal_but_not_in_strict(fake_retriever)
         "n": 1,
         "refusal_accuracy": 1.0,
         "refusal_accuracy_strict": 0.0,
+        "grounded_refusal_accuracy": 1.0,
+        "over_refusals": 0,
+        "grounded_refusals": 1,
+        "ungrounded_answers": 0,
     }
     lines = format_markdown(report).splitlines()
-    assert "| out_of_scope | 1 | 0 | - | - | 0 | - | 1.000 | 0.000 |" in lines
+    assert "| out_of_scope | 1 | 0 | - | - | 0 | - | 1.000 | 0.000 | 1.000 |" in lines
 
 
 def test_exact_refusal_is_the_same_in_both_metrics(fake_retriever):
@@ -332,10 +341,10 @@ def test_format_markdown_with_llm_shows_each_metric_denominator(fake_retriever):
     # 마지막 열(문구 일치만 센 거절 정확도)은 Task 20에서 더했다. 앞의 열은 그대로다
     assert (
         "| 구분 | n | 근거 n | Recall@5 | MRR | 인용 n | 인용 정밀도 | 거절 정확도 "
-        "| 거절 정확도(문구 일치만) |"
+        "| 거절 정확도(문구 일치만) | 근거 기준 거절 정확도 |"
     ) in lines
-    assert "| 전체 | 3 | 2 | 0.500 | 0.500 | 3 | 0.333 | 0.667 | 0.667 |" in lines
-    assert "| out_of_scope | 1 | 0 | - | - | 1 | 0.000 | 0.000 | 0.000 |" in lines
+    assert "| 전체 | 3 | 2 | 0.500 | 0.500 | 3 | 0.333 | 0.667 | 0.667 | 0.333 |" in lines
+    assert "| out_of_scope | 1 | 0 | - | - | 1 | 0.000 | 0.000 | 0.000 | 0.000 |" in lines
     refusing = run_eval(
         items_with_one_oos,
         fake_retriever,
@@ -345,7 +354,8 @@ def test_format_markdown_with_llm_shows_each_metric_denominator(fake_retriever):
         role="준법감시",
     )
     # 모두 거절하면 인용한 문항이 없어 인용 정밀도를 잴 수 없다
-    assert "| 전체 | 3 | 2 | 0.500 | 0.500 | 0 | - | 0.333 | 0.333 |" in format_markdown(refusing)
+    text = format_markdown(refusing)
+    assert "| 전체 | 3 | 2 | 0.500 | 0.500 | 0 | - | 0.333 | 0.333 | 0.667 |" in text
 
 
 def test_format_markdown_retrieval_only_has_no_answer_columns(fake_retriever):
@@ -524,3 +534,87 @@ def test_cli_llm_failure_mid_run_saves_no_report(tmp_path, monkeypatch, capsys):
     assert not list(reports.glob("**/*.json"))
     err = capsys.readouterr().err
     assert "LLM unavailable: bank-001 (0/2 scored)" in err and "not reachable" in err
+
+
+# --- 근거 기준 거절 지표 (Task 20 후속): 검색 실패와 생성 실패를 가른다 ---
+# fake_retriever: q1은 근거가 상위 k에 있고, q2는 없고(검색 실패), q3는 범위 밖이다
+
+
+def grounded_fields(report: EvalReport) -> list[tuple[bool, bool]]:
+    return [(r["evidence_in_context"], r["grounded_refusal_correct"]) for r in report.items]
+
+
+def test_grounded_metric_when_everything_is_answered(fake_retriever):
+    report = run_eval(
+        items_with_one_oos,
+        fake_retriever,
+        k=5,
+        llm=FakeLLM("답입니다 [1]."),
+        workspace=ws,
+        role="준법감시",
+    )
+    # q1만 맞다. q2(검색 실패)와 q3(범위 밖)는 근거 없이 답했다
+    assert grounded_fields(report) == [(True, True), (False, False), (False, False)]
+    assert report.grounded_refusal_accuracy == pytest.approx(1 / 3)
+    assert (report.over_refusals, report.grounded_refusals, report.ungrounded_answers) == (0, 0, 2)
+    # 기존 지표는 q2를 "답해서 정답"으로 센다
+    assert report.refusal_accuracy == pytest.approx(2 / 3)
+
+
+def test_grounded_metric_when_everything_is_refused(fake_retriever):
+    report = run_eval(
+        items_with_one_oos,
+        fake_retriever,
+        k=5,
+        llm=FakeLLM(REFUSAL_TEXT),
+        workspace=ws,
+        role="준법감시",
+    )
+    # q1은 근거가 있는데 거절(과잉 거절). q2는 근거가 없어서 거절했으니 정답이다
+    assert grounded_fields(report) == [(True, False), (False, True), (False, True)]
+    assert report.grounded_refusal_accuracy == pytest.approx(2 / 3)
+    assert (report.over_refusals, report.grounded_refusals, report.ungrounded_answers) == (1, 2, 0)
+    assert report.refusal_accuracy == pytest.approx(1 / 3)  # 기존 지표는 q2의 거절을 오답으로 센다
+    assert report.by_qtype["table"]["grounded_refusals"] == 1
+    assert (
+        "근거가 있는데 거절 1 · 근거가 없어서 거절 2 · 근거가 없는데 답함 0 "
+        "(근거 = 상위 5개에 라벨된 근거가 하나라도 있음)"
+    ) in format_markdown(report).splitlines()
+
+
+def test_partial_evidence_counts_as_evidence_in_context(fake_retriever):
+    # 근거 두 개 중 하나(제2조)만 상위 k에 들어왔다: recall 0.5여도 "근거 있음"으로 본다
+    two = GoldItem(
+        id="bank-040",
+        question="q1",
+        answer="a",
+        evidence=[
+            Evidence(doc_id="banking-act", article="제2조"),
+            Evidence(doc_id="prod-fixed-deposit"),
+        ],
+        qtype="multi_doc",
+    )
+    answered = run_eval([two], fake_retriever, 5, FakeLLM("답 [1]."), ws, "준법감시")
+    assert answered.items[0]["recall_at_k"] == 0.5
+    assert grounded_fields(answered) == [(True, True)]
+    refused = run_eval([two], fake_retriever, 5, FakeLLM(REFUSAL_TEXT), ws, "준법감시")
+    assert grounded_fields(refused) == [(True, False)] and refused.over_refusals == 1
+
+
+def test_retrieval_only_report_has_no_grounded_metric(fake_retriever):
+    report = run_eval(
+        items_with_one_oos, fake_retriever, k=5, llm=None, workspace=ws, role="준법감시"
+    )
+    assert report.grounded_refusal_accuracy is None and report.over_refusals is None
+    assert "evidence_in_context" not in report.items[0]
+    assert "over_refusals" not in report.by_qtype["lookup"]
+    assert "근거가 있는데 거절" not in format_markdown(report)
+
+
+def test_role_without_access_refuses_everything_as_grounded_refusals(fake_retriever):
+    # 볼 수 있는 등급이 없으면 검색 결과가 없다: 근거가 없어서 거절한 것이다
+    report = run_eval(
+        items_with_one_oos, fake_retriever, k=5, llm=FakeLLM("x"), workspace=ws, role="견학생"
+    )
+    assert (report.over_refusals, report.grounded_refusals, report.ungrounded_answers) == (0, 3, 0)
+    assert report.grounded_refusal_accuracy == 1.0
