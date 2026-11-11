@@ -173,10 +173,92 @@ def test_with_llm_scores_answers_on_every_item(fake_retriever):
         "n": 1,
         "citation_precision": 0.0,
         "refusal_accuracy": 0.0,
+        "refusal_accuracy_strict": 0.0,  # Task 20에서 더한 지표
     }
     oos = report.items[2]
     assert oos["refused"] is False and oos["refusal_correct"] is False
     assert oos["citations"] == [law1.chunk_id] and oos["recall_at_k"] is None
+    assert oos["refusal_kind"] == "none" and oos["raw_answer"] == "답입니다 [1]."
+
+
+# 문구를 바꿔 말한 거절(Task 20). 범위 밖 질문에만 이렇게 답하는 가짜 LLM으로 전후를 가른다
+PARAPHRASED = "제공된 자료로는 신용카드 연회비를 확인할 수 없습니다. [1]에는 그 정보가 없습니다."
+
+
+class ParaphrasingLLM(FakeLLM):
+    """범위 밖 문항(q3)에만 문구를 바꿔 거절하고, 나머지는 인용을 달아 답한다."""
+
+    def generate(self, system: str, user: str, max_tokens: int = 2048) -> LLMResponse:
+        response = super().generate(system, user, max_tokens)
+        question = user.rsplit("[질문]\n", 1)[-1]
+        text = PARAPHRASED if question.strip() == "q3" else "답입니다 [1]."
+        return response.model_copy(update={"text": text})
+
+
+def test_paraphrased_refusal_counts_as_refusal_but_not_in_strict(fake_retriever):
+    report = run_eval(
+        items_with_one_oos,
+        fake_retriever,
+        k=5,
+        llm=ParaphrasingLLM("unused"),
+        workspace=ws,
+        role="준법감시",
+    )
+    oos = report.items[2]
+    assert oos["refusal_kind"] == "paraphrase" and oos["refused"] is True
+    assert oos["refusal_correct"] is True and oos["refusal_correct_strict"] is False
+    # 화면에 나가는 답은 정해진 문구이고 인용은 없다. 모델이 쓴 말은 raw_answer에 남는다
+    assert oos["answer"] == REFUSAL_TEXT and oos["citations"] == []
+    assert oos["raw_answer"] == PARAPHRASED == oos["llm"]["text"]
+    # 새 판정은 3/3, 문구 일치만 세면 범위 밖 1문항이 틀려 2/3
+    assert report.refusal_accuracy == 1.0
+    assert report.refusal_accuracy_strict == pytest.approx(2 / 3)
+    assert report.by_qtype["out_of_scope"] == {
+        "n": 1,
+        "refusal_accuracy": 1.0,
+        "refusal_accuracy_strict": 0.0,
+    }
+    lines = format_markdown(report).splitlines()
+    assert "| out_of_scope | 1 | 0 | - | - | 0 | - | 1.000 | 0.000 |" in lines
+
+
+def test_exact_refusal_is_the_same_in_both_metrics(fake_retriever):
+    report = run_eval(
+        items_with_one_oos,
+        fake_retriever,
+        k=5,
+        llm=FakeLLM(f"{REFUSAL_TEXT} 자료에 없습니다."),
+        workspace=ws,
+        role="준법감시",
+    )
+    assert [r["refusal_kind"] for r in report.items] == ["exact"] * 3
+    assert report.refusal_accuracy == report.refusal_accuracy_strict == pytest.approx(1 / 3)
+    assert report.items[0]["raw_answer"] == f"{REFUSAL_TEXT} 자료에 없습니다."
+
+
+def test_refusal_without_llm_call_is_exact_with_no_raw_answer(fake_retriever):
+    # 볼 수 있는 등급이 없는 역할: 검색도 LLM 호출도 없이 정해진 문구로 거절한다
+    report = run_eval(
+        items_with_one_oos, fake_retriever, k=5, llm=FakeLLM("x"), workspace=ws, role="견학생"
+    )
+    assert [r["refusal_kind"] for r in report.items] == ["exact"] * 3
+    assert all(r["raw_answer"] is None and r["llm"] is None for r in report.items)
+    assert report.refusal_accuracy == report.refusal_accuracy_strict
+
+
+def test_report_without_strict_field_still_loads():
+    # v0.2.0까지의 보고서에는 refusal_accuracy_strict가 없다
+    old = {
+        "config": {},
+        "n": 1,
+        "recall_at_k": 1.0,
+        "mrr": 1.0,
+        "citation_precision": None,
+        "refusal_accuracy": 0.5,
+        "by_qtype": {},
+        "items": [],
+    }
+    assert EvalReport.model_validate(old).refusal_accuracy_strict is None
 
 
 def test_with_llm_refusing_everything(fake_retriever):
@@ -247,9 +329,13 @@ def test_format_markdown_has_overall_qtype_and_article_only_rows(fake_retriever)
 def test_format_markdown_with_llm_shows_each_metric_denominator(fake_retriever):
     # LLM 표는 지표마다 분모가 다르다: Recall·MRR은 근거가 있는 문항, 인용 정밀도는 인용한 문항
     lines = format_markdown(report_for(fake_retriever)).splitlines()
-    assert "| 구분 | n | 근거 n | Recall@5 | MRR | 인용 n | 인용 정밀도 | 거절 정확도 |" in lines
-    assert "| 전체 | 3 | 2 | 0.500 | 0.500 | 3 | 0.333 | 0.667 |" in lines
-    assert "| out_of_scope | 1 | 0 | - | - | 1 | 0.000 | 0.000 |" in lines
+    # 마지막 열(문구 일치만 센 거절 정확도)은 Task 20에서 더했다. 앞의 열은 그대로다
+    assert (
+        "| 구분 | n | 근거 n | Recall@5 | MRR | 인용 n | 인용 정밀도 | 거절 정확도 "
+        "| 거절 정확도(문구 일치만) |"
+    ) in lines
+    assert "| 전체 | 3 | 2 | 0.500 | 0.500 | 3 | 0.333 | 0.667 | 0.667 |" in lines
+    assert "| out_of_scope | 1 | 0 | - | - | 1 | 0.000 | 0.000 | 0.000 |" in lines
     refusing = run_eval(
         items_with_one_oos,
         fake_retriever,
@@ -259,7 +345,7 @@ def test_format_markdown_with_llm_shows_each_metric_denominator(fake_retriever):
         role="준법감시",
     )
     # 모두 거절하면 인용한 문항이 없어 인용 정밀도를 잴 수 없다
-    assert "| 전체 | 3 | 2 | 0.500 | 0.500 | 0 | - | 0.333 |" in format_markdown(refusing)
+    assert "| 전체 | 3 | 2 | 0.500 | 0.500 | 0 | - | 0.333 | 0.333 |" in format_markdown(refusing)
 
 
 def test_format_markdown_retrieval_only_has_no_answer_columns(fake_retriever):

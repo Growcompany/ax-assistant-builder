@@ -33,6 +33,7 @@ from axbuilder.eval.metrics import (
 )
 from axbuilder.generation.answer import answer
 from axbuilder.generation.llm import LLMClient, LLMUnavailableError, get_llm
+from axbuilder.generation.refusal import RefusalKind
 from axbuilder.ingest.chunking import chunk_document
 from axbuilder.ingest.loaders import load_document
 from axbuilder.models import Answer, Chunk, ScoredChunk
@@ -62,6 +63,8 @@ class EvalReport(BaseModel):
     mrr: float
     citation_precision: float | None  # 인용이 하나라도 있는 문항의 평균. LLM 없이는 None
     refusal_accuracy: float | None  # LLM 없이는 None
+    # 정해진 문구(EXACT)만 거절로 센 값 = v0.2.0까지의 규칙. 예전 보고서에는 없어 기본값을 둔다
+    refusal_accuracy_strict: float | None = None
     by_qtype: dict[str, dict[str, float]]  # qtype → {"n", 지표...} (잴 수 없는 지표는 빠짐)
     items: list[dict]  # 문항별 기록: 검색 결과·적중 여부·답변·지연 (실패 사례 분석용)
     # 계획의 Interfaces에 없는 필드: 색인·평가 시간과 질문당 지연(초·밀리초). 결과라 config와 나눈다
@@ -133,6 +136,7 @@ def run_eval(
         mrr=overall["mrr"],
         citation_precision=overall.get("citation_precision"),
         refusal_accuracy=overall.get("refusal_accuracy"),
+        refusal_accuracy_strict=overall.get("refusal_accuracy_strict"),
         by_qtype=by_qtype,
         items=records,
         timing={
@@ -189,6 +193,12 @@ def _record(
                 "citation_precision": citation_precision(result.citations, item.evidence),
                 "answer": result.text,
                 "llm": None if result.llm is None else result.llm.model_dump(),
+                "refusal_kind": result.refusal_kind.value,
+                "refusal_correct_strict": refusal_correct(
+                    result.refusal_kind is RefusalKind.EXACT, item.qtype
+                ),
+                # 정규화 전 모델 출력. 바꿔 말한 거절도 answer는 정해진 문구라 원문은 여기서 본다
+                "raw_answer": None if result.llm is None else result.llm.text,
             }
         )
     return record
@@ -200,6 +210,7 @@ _SUMMARY_KEYS = {
     "mrr": "reciprocal_rank",
     "citation_precision": "citation_precision",
     "refusal_accuracy": "refusal_correct",
+    "refusal_accuracy_strict": "refusal_correct_strict",
 }
 
 
@@ -261,6 +272,7 @@ def format_markdown(report: EvalReport) -> str:
             ("인용 n", "citation_precision", True),
             ("인용 정밀도", "citation_precision", False),
             ("거절 정확도", "refusal_accuracy", False),
+            ("거절 정확도(문구 일치만)", "refusal_accuracy_strict", False),
         ]
     columns = ["구분", "n", *(column for column, _, _ in layout)]
 
