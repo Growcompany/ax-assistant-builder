@@ -5,6 +5,7 @@ Windows에서 임시 폴더의 잠금 파일이 풀린다.
 """
 
 import io
+import json
 import re
 import zipfile
 import zlib
@@ -1064,3 +1065,35 @@ def test_tied_chunks_keep_their_order_after_restart(settings):
             restarted = ask(client, question="보호 한도").json()
         assert restarted["citations"] == built["citations"]
         assert again.last_user == first.last_user  # 프롬프트에 들어간 자료와 순서가 같다
+
+
+# ---- 문구를 바꿔 말한 거절 (M-2 Task 20) ----
+
+PARAPHRASED_REFUSAL = (
+    "제공된 자료로는 신용카드 연회비를 확인할 수 없습니다. "
+    "[1]에는 예금 보호 한도만 명시되어 있으며, 연회비 정보는 포함되어 있지 않습니다."
+)
+
+
+def test_ask_paraphrased_refusal_is_normalized_and_adds_no_field(settings):
+    # 모델이 정해진 문구를 지키지 않고 거절해도 화면에는 정해진 문구만, 인용 없이 나간다.
+    # 응답 모양은 그대로다: refusal_kind나 모델 원문은 나가지 않는다
+    with open_client(settings, FakeLLM(PARAPHRASED_REFUSAL)) as client:
+        setup_indexed(client)
+        body = ask(client, question="신용카드 연회비는?").json()
+    assert set(body) == {"answer", "citations", "refused", "latency_ms", "passages", "model"}
+    assert body["refused"] is True and body["answer"] == REFUSAL_TEXT
+    assert body["citations"] == [] and body["passages"] == []
+    assert "연회비" not in json.dumps(body, ensure_ascii=False)
+
+
+def test_ask_partial_answer_is_not_turned_into_a_refusal(settings):
+    # 일부만 답한 답변은 그대로 나간다(Review Focus 1)
+    reply = (
+        "제공된 자료로는 퇴직연금 한도를 확인할 수 없습니다. 보호한도는 대통령령으로 정합니다 [1]."
+    )
+    with open_client(settings, FakeLLM(reply)) as client:
+        setup_indexed(client)
+        body = ask(client).json()
+    assert body["refused"] is False and body["answer"] == reply
+    assert len(body["citations"]) == 1 and len(body["passages"]) == 1

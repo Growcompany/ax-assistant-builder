@@ -3,11 +3,14 @@
 import re
 
 from axbuilder.generation.llm import LLMClient
+
+# REFUSAL_TEXT는 판정 규칙과 함께 refusal.py에 있다. 기존 import 경로(answer.REFUSAL_TEXT)는 유지
+from axbuilder.generation.refusal import REFUSAL_TEXT, RefusalKind, classify_refusal
 from axbuilder.models import Answer, Chunk, Citation, ScoredChunk
 from axbuilder.retrieval.hybrid import Retriever
 from axbuilder.workspace import Workspace
 
-REFUSAL_TEXT = "제공된 자료로는 확인할 수 없습니다."
+__all__ = ["CITATION", "REFUSAL_TEXT", "SYSTEM_PROMPT", "answer", "build_prompt"]
 
 SYSTEM_PROMPT = """\
 당신은 {name}의 문서 기반 상담 보조원입니다.
@@ -19,20 +22,7 @@ SYSTEM_PROMPT = """\
 # [1], [1][2], [1, 2] 모두 받는다. 작은 모델은 프롬프트의 예시와 달리 쉼표로 묶기도 한다.
 # 숫자는 ASCII만: \d는 전각 '０'·아라비아 '٠' 같은 유니코드 숫자도 받는다
 CITATION = re.compile(r"\[([0-9]+(?:\s*,\s*[0-9]+)*)\]")
-# 거절 판정 때 무시하는 것: 공백, 따옴표, 백틱, 마크다운 굵게(**), 인용 표시 [n]
-_NOISE = re.compile(r"[\s\"'“”‘’`*]+")
-# 거절 판정용 인용 표시는 CITATION과 달리 유니코드 숫자(\d: 전각 '０', 아라비아 '٣')도 받는다.
-# 인용으로 매핑하지 않는 '[０]'도 내용은 아니므로, 그것만 있는 답은 거절이다
-_MARKER = re.compile(r"\[\d+(?:\s*,\s*\d+)*\]")
 _WORD = re.compile(r"\w")  # 글자·숫자(한글 포함)
-
-
-def _normalize(text: str) -> str:
-    return _NOISE.sub("", _MARKER.sub("", text))
-
-
-# 끝의 마침표는 빼고 비교한다: "…없습니다!", "…없습니다。"도 거절이다
-_REFUSAL_CORE = _normalize(REFUSAL_TEXT).rstrip(".")
 
 
 def build_prompt(question: str, chunks: list[ScoredChunk], workspace: Workspace) -> tuple[str, str]:
@@ -69,15 +59,30 @@ def answer(
         retriever.search(question, k=k, access_levels=access_levels) if access_levels else []
     )
     if not retrieved:
-        return Answer(text=REFUSAL_TEXT, citations=[], refused=True, retrieved=[], llm=None)
+        # LLM을 부르지 않고 정해진 문구를 그대로 내보내므로 EXACT다
+        return Answer(
+            text=REFUSAL_TEXT,
+            citations=[],
+            refused=True,
+            retrieved=[],
+            llm=None,
+            refusal_kind=RefusalKind.EXACT,
+        )
 
     system, user = build_prompt(question, retrieved, workspace)
     # max_tokens는 넘기지 않는다: 클라이언트마다 알맞은 기본값이 다르다(Claude는 생각 토큰 포함)
     response = llm.generate(system, user)
-    if _is_refusal(response.text):
-        # 화면·평가에는 정해진 문구만 보낸다. 모델이 덧붙인 말은 response.text에 남는다
+    kind = classify_refusal(response.text)
+    if kind is not RefusalKind.NONE:
+        # 화면·평가에는 정해진 문구만 보낸다. 문구를 바꿔 말한 거절(PARAPHRASE)도 같다: 거절
+        # 이유에 붙은 무관한 인용이 근거처럼 나가지 않게 한다. 모델이 쓴 말은 response.text에 남는다
         return Answer(
-            text=REFUSAL_TEXT, citations=[], refused=True, retrieved=retrieved, llm=response
+            text=REFUSAL_TEXT,
+            citations=[],
+            refused=True,
+            retrieved=retrieved,
+            llm=response,
+            refusal_kind=kind,
         )
     # 거절이 아니면 인용 표시 밖에 글자나 숫자가 있으므로 text는 비지 않는다
     text, citations = _renumber_citations(response.text, retrieved)
@@ -139,16 +144,3 @@ def _chunk_for(digits: str, retrieved: list[ScoredChunk]) -> Chunk | None:
         return None
     number = int(digits)
     return retrieved[number - 1].chunk if 1 <= number <= len(retrieved) else None
-
-
-def _is_refusal(text: str) -> bool:
-    """정규화한 응답에 글자·숫자가 없거나 거절 문구로 시작하면 거절이다.
-
-    글자·숫자가 없는 응답 = Claude의 안전 거절(stop_reason="refusal")로 온 빈 텍스트, 또는
-    "[9].", "[1]."처럼 인용 표시와 문장부호뿐인 응답.
-    "확인할 수 없습니다. [1]에는 …이 없습니다"처럼 거절 이유에 자료 번호가 나오기도 해서,
-    거절 문구로 시작하면 뒤에 인용이 있어도 거절로 본다. 앞에 실제 답이 있고 거절 문구가
-    뒤에 붙은 부분 답변은 거절이 아니다.
-    """
-    core = _normalize(text)
-    return not _WORD.search(core) or core.startswith(_REFUSAL_CORE)

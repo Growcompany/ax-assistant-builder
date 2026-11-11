@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from axbuilder.generation.refusal import RefusalKind
+
 
 class Page(BaseModel):
     number: int = Field(ge=1)  # 1부터. 빈 페이지도 남겨 두어야 뒤 페이지 번호가 원문과 맞는다
@@ -77,3 +79,5 @@ class Answer(BaseModel):
     refused: bool
     retrieved: list[ScoredChunk]  # 프롬프트에 넣은 청크 (번호 = 순서 + 1). 평가가 검색 지표에 쓴다
     llm: LLMResponse | None  # 원문 응답. 검색 결과가 없어 LLM을 부르지 않았으면 None
+    # 거절을 어떻게 알아봤나. refused == (refusal_kind != NONE). API 응답에는 내보내지 않는다
+    refusal_kind: RefusalKind = RefusalKind.NONE
