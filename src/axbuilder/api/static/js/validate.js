@@ -39,11 +39,31 @@ export function checkDocId(value) {
   return ok ? null : RULES.doc_id;
 }
 
+const WHITE_SPACE = /\p{White_Space}/u;
+
+// 서버(pydantic의 strip_whitespace)와 같은 앞뒤 공백 제거: 유니코드 White_Space만 뗀다.
+// String.prototype.trim()은 U+FEFF도 떼지만 서버는 떼지 않는다(그 글자는 형식 문자라 서버가 거절한다).
+export function serverTrim(value) {
+  const chars = [...String(value ?? "")];
+  let start = 0;
+  let end = chars.length;
+  while (start < end && WHITE_SPACE.test(chars[start])) start += 1;
+  while (end > start && WHITE_SPACE.test(chars[end - 1])) end -= 1;
+  return chars.slice(start, end).join("");
+}
+
+// 서버가 세는 길이: 코드 포인트 수(파이썬 len). "length"는 UTF-16 단위라 이모지를 둘로 센다.
+export function charCount(value) {
+  let count = 0;
+  for (const _ of String(value ?? "")) count += 1;
+  return count;
+}
+
 // 한 줄 입력(제목·출처·이름 등): 앞뒤 공백을 뺀 길이와 제어·형식 문자를 본다.
 export function checkLine(field, value, min, max) {
-  const text = value.trim();
-  const bad =
-    text.length < min || text.length > max || CONTROL.test(text) || FORMAT_CHARS.test(text);
+  const text = serverTrim(value);
+  const length = charCount(text);
+  const bad = length < min || length > max || CONTROL.test(text) || FORMAT_CHARS.test(text);
   return bad ? RULES[field] : null;
 }
 

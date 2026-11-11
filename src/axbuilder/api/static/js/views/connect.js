@@ -1,7 +1,7 @@
 // 연결 탭: 이 어시스턴트를 다른 프로그램에서 쓰기 위한 API 키와 복사해 쓰는 예시.
 // 키 원문은 만든 직후 대화상자에서 한 번만 보여 준다. 대화상자를 닫으면 화면(DOM)에서 지우고,
 // 이 탭의 메모리에만 잠깐 들고 있다가(예시를 복사할 때 채워 넣으려고) 다른 화면으로 가면 버린다.
-// localStorage 등 어디에도 저장하지 않는다.
+// 브라우저 저장소 어디에도 저장하지 않는다.
 
 import { api } from "../api.js";
 import { $, announce, copyButton, errorNotice, h, icon, replace, roleTag, setFieldError } from "../dom.js";
@@ -10,6 +10,34 @@ import { currentRole, state } from "../state.js";
 
 const PLACEHOLDER_KEY = "axb_…";
 const QUESTION = "질문을 여기에 적으세요";
+// 방금 만든 키를 메모리에 들고 있는 시간. 지나면 잊고, 탭이 숨겨진 채로는 더 빨리 잊는다
+const FRESH_KEY_MS = 5 * 60 * 1000;
+const FRESH_KEY_HIDDEN_MS = 60 * 1000;
+
+// 지금 키를 들고 있는 연결 탭의 "잊기". 화면에는 연결 탭이 하나뿐이라 하나만 둔다
+let forgetFreshKey = null;
+let freshTimer = 0;
+let hiddenTimer = 0;
+let hiddenSince = 0;
+
+function dropFreshKey() {
+  window.clearTimeout(freshTimer);
+  window.clearTimeout(hiddenTimer);
+  const forget = forgetFreshKey;
+  forgetFreshKey = null;
+  if (forget) forget();
+}
+
+document.addEventListener("visibilitychange", () => {
+  window.clearTimeout(hiddenTimer);
+  if (document.hidden) {
+    hiddenSince = Date.now();
+    hiddenTimer = window.setTimeout(dropFreshKey, FRESH_KEY_HIDDEN_MS);
+  } else if (hiddenSince && Date.now() - hiddenSince >= FRESH_KEY_HIDDEN_MS) {
+    // 숨겨진 동안 타이머가 늦게 돌았어도, 다시 보일 때 시간이 지났으면 잊는다
+    dropFreshKey();
+  }
+});
 const DATA_DIR_PLACEHOLDER = "<데이터 폴더의 절대 경로>";
 
 function when(value) {
@@ -260,8 +288,19 @@ export function createConnectView(workspaceId) {
 
   function forget() {
     freshKey = null;
+    if (forgetFreshKey === forget) {
+      forgetFreshKey = null;
+      window.clearTimeout(freshTimer);
+    }
     renderFresh();
     renderExamples();
+  }
+
+  function remember(key) {
+    dropFreshKey(); // 다른 워크스페이스의 연결 탭이 들고 있던 키도 함께 잊는다
+    freshKey = key;
+    forgetFreshKey = forget;
+    freshTimer = window.setTimeout(dropFreshKey, FRESH_KEY_MS);
   }
 
   function showKeyDialog(created) {
@@ -311,7 +350,7 @@ export function createConnectView(workspaceId) {
     try {
       const created = await api.createKey(workspaceId, name, role);
       if (!created || typeof created.key !== "string") throw new Error("no key in response");
-      freshKey = { key: created.key, keyId: created.key_id, name: created.name || name, prefix: `${created.key.slice(0, 8)}…` };
+      remember({ key: created.key, keyId: created.key_id, name: created.name || name, prefix: `${created.key.slice(0, 8)}…` });
       nameInput.value = "";
       renderFresh();
       renderExamples();
@@ -344,7 +383,7 @@ export function createConnectView(workspaceId) {
           "div",
           { class: "notice-body" },
           h("p", { class: "notice-title", text: `예시를 복사하면 방금 만든 키 "${freshKey.name}"(${freshKey.prefix})가 채워집니다` }),
-          h("p", { class: "notice-text", text: "키는 화면에 보이지 않고, 새로 고치면 잊습니다." }),
+          h("p", { class: "notice-text", text: "키는 화면에 보이지 않고, 5분 뒤나 새로 고치면 잊습니다." }),
         ),
         h("button", { class: "btn", type: "button", on: { click: () => { forget(); nameInput.focus(); } } }, "지금 잊기"),
       ),
@@ -461,6 +500,7 @@ export function createConnectView(workspaceId) {
     renderExamples();
   }
 
+  dropFreshKey(); // 새 연결 탭이 생기면(다른 워크스페이스로 이동) 앞 탭이 들고 있던 키를 잊는다
   renderFresh();
   return { root, sync };
 }

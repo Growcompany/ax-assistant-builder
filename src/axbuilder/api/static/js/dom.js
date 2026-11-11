@@ -3,6 +3,33 @@
 import { splitCommand } from "./naming.js";
 
 const BOOLEAN_PROPS = new Set(["disabled", "hidden", "checked", "required", "open", "readOnly"]);
+// h()가 속성으로 넣어도 되는 이름. 여기에 없는 이름은 예외를 던진다: 주소를 싣는 속성(링크·이미지·양식
+// 보내는 곳), 인라인 스타일, 인라인 이벤트처럼 값이 실행되거나 밖으로 요청을 보내는 속성이 실수로도
+// 서버에서 온 값과 만나지 않게 한다. 이벤트는 on: { click: 함수 }로만 붙인다.
+const SAFE_ATTRIBUTES = new Set([
+  "accept",
+  "autocomplete",
+  "for",
+  "id",
+  "maxlength",
+  "multiple",
+  "name",
+  "novalidate",
+  "placeholder",
+  "role",
+  "rows",
+  "scope",
+  "selected",
+  "spellcheck",
+  "tabindex",
+  "title",
+  "type",
+]);
+const SAFE_ATTRIBUTE_PREFIX = /^(?:aria|data)-[a-z][a-z-]*$/;
+
+function isSafeAttribute(name) {
+  return SAFE_ATTRIBUTES.has(name) || SAFE_ATTRIBUTE_PREFIX.test(name);
+}
 
 function append(node, children) {
   for (const child of children) {
@@ -25,6 +52,7 @@ export function h(tag, props, ...children) {
     } else if (key === "data") {
       for (const [name, item] of Object.entries(value)) node.dataset[name] = String(item);
     } else if (BOOLEAN_PROPS.has(key)) node[key] = true;
+    else if (!isSafeAttribute(key)) throw new Error(`h(): attribute "${key}" is not allowed`);
     else node.setAttribute(key, value === true ? "" : String(value));
   }
   append(node, children);

@@ -29,7 +29,7 @@ export function createDocumentsView(workspaceId) {
   );
   const fileError = h("p", { class: "field-error", id: "up-file-error", hidden: true });
   const rowsSlot = h("div", { class: "batch-slot" });
-  const source = h("input", { id: "up-source", type: "text", autocomplete: "off", maxlength: "500", placeholder: "예: 준법감시부, 2026. 3. 개정", "aria-describedby": "up-source-hint up-source-error" });
+  const source = h("input", { id: "up-source", type: "text", autocomplete: "off", maxlength: "1000", placeholder: "예: 준법감시부, 2026. 3. 개정", "aria-describedby": "up-source-hint up-source-error" });
   const sourceError = h("p", { class: "field-error", id: "up-source-error", hidden: true });
   const levelError = h("p", { class: "field-error", id: "up-access_level-error", hidden: true });
   const level = (value, description) =>
@@ -157,7 +157,7 @@ export function createDocumentsView(workspaceId) {
           }
           const n = row.key;
           const idInput = h("input", { id: `up-id-${n}`, type: "text", autocomplete: "off", spellcheck: "false", maxlength: "64", value: row.id, disabled: uploading, "aria-describedby": `up-id-${n}-error` });
-          const titleInput = h("input", { id: `up-title-${n}`, type: "text", autocomplete: "off", maxlength: "200", value: row.title, disabled: uploading, "aria-describedby": `up-title-${n}-error` });
+          const titleInput = h("input", { id: `up-title-${n}`, type: "text", autocomplete: "off", maxlength: "400", value: row.title, disabled: uploading, "aria-describedby": `up-title-${n}-error` });
           const typeSelect = h(
             "select",
             { id: `up-type-${n}`, disabled: uploading },

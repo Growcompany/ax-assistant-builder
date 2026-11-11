@@ -52,7 +52,7 @@ function roleRow(name, levels) {
       class: "role-name-input",
       id: `qc-role-${n}`,
       type: "text",
-      maxlength: "50",
+      maxlength: "100",
       autocomplete: "off",
       placeholder: "역할 이름",
       "aria-label": "역할 이름",

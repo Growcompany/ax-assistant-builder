@@ -7,7 +7,7 @@ import { badge, errorNotice, h, icon, replace, roleTag, setFieldError } from "..
 import { describeError } from "../errors.js";
 import { formatLatency } from "../format.js";
 import { conversation, currentRole, documentOf, setRole, state } from "../state.js";
-import { MAX_QUESTION_CHARS, RULES } from "../validate.js";
+import { MAX_QUESTION_CHARS, RULES, charCount } from "../validate.js";
 import { citationLabel, showEvidence } from "./evidence.js";
 
 // README "데모"의 질문 4개. 같은 질문을 역할만 바꿔 묻는 쌍이 들어 있다.
@@ -33,7 +33,7 @@ export function createAskView(workspaceId) {
     class: "composer-input",
     id: "question",
     rows: "2",
-    maxlength: String(MAX_QUESTION_CHARS),
+    maxlength: String(MAX_QUESTION_CHARS * 2), // UTF-16 단위. 실제 상한은 코드 포인트로 센다
     placeholder: "문서에 대해 질문하세요",
     "aria-describedby": "question-hint question-error",
   });
@@ -85,7 +85,7 @@ export function createAskView(workspaceId) {
       textarea.focus();
       return;
     }
-    if (question.length > MAX_QUESTION_CHARS) {
+    if (charCount(question) > MAX_QUESTION_CHARS) {
       setFieldError(textarea, questionError, RULES.question);
       return;
     }
@@ -97,7 +97,7 @@ export function createAskView(workspaceId) {
   }
 
   function updateCounter() {
-    counter.textContent = `${textarea.value.length} / ${MAX_QUESTION_CHARS}`;
+    counter.textContent = `${charCount(textarea.value)} / ${MAX_QUESTION_CHARS}`;
   }
 
   composer.addEventListener("submit", (event) => {

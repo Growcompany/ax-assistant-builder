@@ -12,28 +12,45 @@
 // 그 밖의 글자는 그대로, 줄바꿈도 그대로 둔다.
 // 표는 청크 경계에서 잘릴 수 있다: 머리 줄 없이 시작하면 머리 없는 표로 그리고, 열 수가 표의 첫 줄과
 // 다른 줄은 표에 넣지 않고 글자 그대로 보여 준다.
+//
+// 원문은 올린 문서에서 그대로 오므로 악의적으로 만든 입력일 수 있다. 화면이 멈추지 않게:
+//   - 줄은 먼저 끝 공백을 떼고, 정규식은 겹치는 반복이 없는 것만 쓴다(입력 길이에 비례하는 시간)
+//   - MAX_LINE_CHARS보다 긴 줄은 해석하지 않고 글자 그대로 둔다
+//   - MAX_TEXT_CHARS보다 긴 원문은 전체를 서식 없이 보여 주고 그 사실을 한 줄로 알린다
 
-import { parseInline } from "./answer.js";
+import { MAX_LINE_CHARS, MAX_TEXT_CHARS, parseInline, stripBidi } from "./answer.js";
 import { h } from "./dom.js";
 
-const HEADING = /^\s{0,3}(#{1,4})\s+(.*\S)\s*$/;
-const TABLE_ROW = /^\s*\|.*\|\s*$/;
-const TABLE_RULE = /^\s*\|(?:\s*:?-{2,}:?\s*\|)+\s*$/;
-const BULLET = /^\s*[-*]\s+(.*)$/;
-const NUMBERED = /^\s*(\d{1,3})\.\s+(.*)$/;
+// 모두 끝 공백을 뗀 줄에 쓴다
+const HEADING = /^[ \t]{0,3}(#{1,4})[ \t]+(\S.*)$/;
+const TABLE_RULE = /^\|(?:[ \t]{0,8}:?-{2,64}:?[ \t]{0,8}\|){1,64}$/;
+const BULLET = /^[ \t]{0,8}[-*][ \t]+(\S.*)$/;
+const NUMBERED = /^[ \t]{0,8}(\d{1,3})\.[ \t]+(\S.*)$/;
+const MAX_TABLE_COLUMNS = 64;
 
-function cells(line) {
-  const inner = line.trim().slice(1, -1);
-  return inner.split("|").map((cell) => cell.trim());
+function isTableRow(trimmed) {
+  return trimmed.length >= 2 && trimmed.startsWith("|") && trimmed.endsWith("|");
 }
 
-// 원문 -> 블록 배열:
-//   { type: "heading", text }
-//   { type: "table", head: [칸] | null, rows: [[칸]] }
-//   { type: "list", ordered, items: [{ number, text }] }
-//   { type: "text", lines: [줄] }
+function cells(trimmed) {
+  return trimmed
+    .slice(1, -1)
+    .split("|")
+    .map((cell) => cell.trim());
+}
+
+// 원문 -> { blocks, plain }
+//   blocks: { type: "heading", text }
+//           { type: "table", head: [칸] | null, rows: [[칸]] }
+//           { type: "list", ordered, items: [{ number, text }] }
+//           { type: "text", lines: [줄] }
+//   plain: 너무 길어서 서식 없이 통째로 보여 주는가
 export function parsePassage(source) {
-  const lines = String(source || "").replace(/\r\n?/g, "\n").split("\n");
+  const text = stripBidi(source).replace(/\r\n?/g, "\n");
+  if (text.length > MAX_TEXT_CHARS) {
+    return { blocks: [{ type: "text", lines: text.split("\n") }], plain: true };
+  }
+  const lines = text.split("\n");
   const blocks = [];
   let current = null;
   const push = (block) => {
@@ -48,38 +65,51 @@ export function parsePassage(source) {
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index];
-    const heading = HEADING.exec(line);
+    if (line.length > MAX_LINE_CHARS) {
+      addText(line); // 너무 긴 줄은 해석하지 않는다
+      continue;
+    }
+    const trimmed = line.trim();
+    if (!trimmed) {
+      // 빈 줄: 글 블록 안에서는 줄바꿈으로 남기고, 표·목록·소제목 뒤에서는 블록을 끝낸다
+      if (current && current.type === "text") current.lines.push("");
+      else current = null;
+      continue;
+    }
+    const tail = line.trimEnd();
+    const heading = HEADING.exec(tail);
     if (heading) {
       push({ type: "heading", text: heading[2] });
       current = null;
       continue;
     }
-    if (TABLE_ROW.test(line)) {
-      if (TABLE_RULE.test(line)) {
+    if (isTableRow(trimmed)) {
+      if (TABLE_RULE.test(trimmed)) {
         // 구분선: 바로 앞에 줄 하나짜리 표가 있으면 그 줄이 머리다. 구분선 자체는 그리지 않는다
         if (current && current.type === "table" && !current.head && current.rows.length === 1) {
           current.head = current.rows.pop();
         }
         if (current && current.type === "table") continue;
         // 표 없이 구분선으로 시작한 경우(청크가 머리 줄 뒤에서 잘림): 구분선만 지운다
-        if (index + 1 < lines.length && TABLE_ROW.test(lines[index + 1])) continue;
+        const next = index + 1 < lines.length ? lines[index + 1] : "";
+        if (next.length <= MAX_LINE_CHARS && isTableRow(next.trim())) continue;
         addText(line);
         continue;
       }
-      const row = cells(line);
-      if (current && current.type === "table") {
+      const row = cells(trimmed);
+      if (row.length > MAX_TABLE_COLUMNS) {
+        addText(line);
+      } else if (current && current.type === "table") {
         const width = (current.head || current.rows[0]).length;
         if (row.length === width) current.rows.push(row);
-        else {
-          addText(line); // 열 수가 안 맞는 줄은 글자 그대로
-        }
+        else addText(line); // 열 수가 안 맞는 줄은 글자 그대로
       } else {
         push({ type: "table", head: null, rows: [row] });
       }
       continue;
     }
-    const bullet = BULLET.exec(line);
-    const numbered = bullet ? null : NUMBERED.exec(line);
+    const bullet = BULLET.exec(tail);
+    const numbered = bullet ? null : NUMBERED.exec(tail);
     if (bullet || numbered) {
       const ordered = Boolean(numbered);
       if (!current || current.type !== "list" || current.ordered !== ordered) {
@@ -88,22 +118,18 @@ export function parsePassage(source) {
       current.items.push(ordered ? { number: Number(numbered[1]), text: numbered[2] } : { number: null, text: bullet[1] });
       continue;
     }
-    if (!line.trim()) {
-      // 빈 줄: 글 블록 안에서는 줄바꿈으로 남기고, 표·목록·소제목 뒤에서는 블록을 끝낸다
-      if (current && current.type === "text") current.lines.push("");
-      else current = null;
-      continue;
-    }
     addText(line);
   }
 
-  // 머리만 있고 내용 줄이 없는 표, 앞뒤 빈 줄 정리
+  // 머리만 있고 내용 줄이 없는 표, 글 블록 앞뒤의 빈 줄 정리
   const cleaned = [];
   for (const block of blocks) {
     if (block.type === "text") {
-      while (block.lines.length && !block.lines[0].trim()) block.lines.shift();
-      while (block.lines.length && !block.lines[block.lines.length - 1].trim()) block.lines.pop();
-      if (block.lines.length) cleaned.push(block);
+      let start = 0;
+      let end = block.lines.length;
+      while (start < end && !block.lines[start].trim()) start += 1;
+      while (end > start && !block.lines[end - 1].trim()) end -= 1;
+      if (end > start) cleaned.push({ type: "text", lines: block.lines.slice(start, end) });
     } else if (block.type === "table") {
       if (block.head && !block.rows.length) {
         block.rows.push(block.head);
@@ -114,7 +140,7 @@ export function parsePassage(source) {
       cleaned.push(block);
     }
   }
-  return cleaned;
+  return { blocks: cleaned, plain: false };
 }
 
 // 한 줄의 글자 -> 노드. **굵게**만 본다(원문 속 [1] 같은 글자는 인용 번호가 아니라 글자다).
@@ -128,11 +154,22 @@ function inline(text) {
 
 export function renderPassage(source) {
   const root = h("div", { class: "passage" });
-  for (const block of parsePassage(source)) {
+  const { blocks, plain } = parsePassage(source);
+  if (plain) {
+    root.appendChild(h("p", { class: "passage-note", text: "원문이 길어 서식 없이 보여 줍니다." }));
+    root.appendChild(h("p", { class: "passage-text", text: blocks[0].lines.join("\n") }));
+    return root;
+  }
+  for (const block of blocks) {
     if (block.type === "heading") {
       root.appendChild(h("h4", { class: "passage-heading" }, inline(block.text)));
     } else if (block.type === "table") {
-      const row = (items, tag) => h("tr", null, items.map((item) => h(tag, tag === "th" ? { scope: "col" } : null, inline(item))));
+      const row = (items, tag) =>
+        h(
+          "tr",
+          null,
+          items.map((item) => h(tag, tag === "th" ? { scope: "col" } : null, inline(item))),
+        );
       root.appendChild(
         h(
           "div",
@@ -141,7 +178,11 @@ export function renderPassage(source) {
             "table",
             { class: "passage-table" },
             block.head ? h("thead", null, row(block.head, "th")) : null,
-            h("tbody", null, block.rows.map((items) => row(items, "td"))),
+            h(
+              "tbody",
+              null,
+              block.rows.map((items) => row(items, "td")),
+            ),
           ),
         ),
       );
