@@ -51,7 +51,7 @@
 1. [`app.py`](../../src/axbuilder/api/app.py)의 `IndexStatus`·`WorkspaceSummary`·`DocumentInfo`·`Passage`(응답 모양)
 2. `app.py`의 `_index_status`(none·ready·stale 판정), `summary`, `detail`
 3. `app.py`의 `answer_with_usage`(`passages`를 어디서 찾는가), `create_demo`와 `_discard_demo`
-4. `app.py`의 `CONTENT_SECURITY_POLICY`, `_UISecurityHeaders`, `create_app` 끝의 `GET /`와 `app.mount("/static", …)`
+4. `app.py`의 `CONTENT_SECURITY_POLICY`, `_SecurityHeaders`(모든 응답의 보안 머리글), `create_app` 끝의 `GET /`와 `app.mount("/static", …)`
 5. [`static/js/main.js`](../../src/axbuilder/api/static/js/main.js)(시작점) → `state.js` → `api.js` → `actions.js`
 6. [`static/js/dom.js`](../../src/axbuilder/api/static/js/dom.js)의 `h()`, [`answer.js`](../../src/axbuilder/api/static/js/answer.js)의 `parseInline`·`renderAnswer`
 7. `static/js/views/`의 `ask.js`(질문 탭), `evidence.js`(근거 패널), `documents.js`(문서 탭), `errors.js`

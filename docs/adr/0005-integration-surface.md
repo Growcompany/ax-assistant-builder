@@ -28,7 +28,7 @@
 
 **3. `/v1/*`가 아닌 모든 경로는 이 PC(loopback)에서 온 요청만 받는다** ([`api/access.py`](../../src/axbuilder/api/access.py)).
 
-- 워크스페이스·업로드·색인·키 발급·`/ask`·`/models`·`/health`·`/docs`·화면이 모두 여기 속한다. 밖에서 오면 403이다. 유효한 키가 있어도 마찬가지다.
+- 워크스페이스·업로드·색인·키 발급·`/ask`·`/models`·`/health`·화면(그리고 켰을 때의 `/docs`)이 모두 여기 속한다. 밖에서 오면 403이다. 유효한 키가 있어도 마찬가지다.
 - "이 PC에서 왔는가"는 ASGI `scope["client"]`(소켓의 상대 주소)가 `127.0.0.0/8` 또는 `::1`인지로만 정한다. `X-Forwarded-For`·`Forwarded`·`X-Real-IP`는 읽지 않는다. 주소가 없거나 이름(`localhost`, `testclient`)이면 밖으로 본다.
 - `/v1/*`는 이 PC에서 불러도 키가 필요하다.
 - `/v1/*`인지는 라우터가 보는 경로(`route_path`: `scope["path"]`에서 `root_path`를 뗀 것)로 판단한다. `root_path`가 있으면(하위 경로 배치) 밖에서 온 요청은 `/v1/*`까지 모두 403이다.
@@ -39,9 +39,9 @@
 |---|---|---|---|
 | 1 | `_RejectForeignHost` | `Host`가 허용 목록에 없으면 403 | DNS 리바인딩 방어는 `/v1/*`를 포함한 모든 경로에 걸려야 한다 |
 | 2 | `AccessRules` | loopback 밖이면 `/v1/*`만, `/v1/*`는 키가 없으면 401. CORS 응답 | 키가 유효한지를 다음 단계가 알아야 한다 |
-| 3 | `_RejectCrossSite` | 다른 출처의 `Origin`, cross-site 상태 변경 요청 403 | 유효한 키가 있는 `/v1/*` 요청만 건너뛴다. 키는 쿠키와 달리 브라우저가 알아서 붙이지 않으므로 다른 사이트 페이지가 사용자 몰래 쓸 수 없고, `/v1/*`는 다른 출처에서 쓰라고 만든 길이다 |
+| 3 | `_RejectCrossSite` | 다른 출처의 `Origin`, cross-site 요청 403(GET 포함. 다른 사이트의 링크로 `/`를 여는 최상위 탐색만 받는다) | 유효한 키가 있는 `/v1/*` 요청만 건너뛴다. 키는 쿠키와 달리 브라우저가 알아서 붙이지 않으므로 다른 사이트 페이지가 사용자 몰래 쓸 수 없고, `/v1/*`는 다른 출처에서 쓰라고 만든 길이다 |
 | 4 | `_BodySizeLimit` | 본문 상한(JSON 64KB, `/v1/*` 1MB, 업로드 50MB + 여유 1MB) | 위 세 검사는 본문을 읽기 전에 끝난다. `/v1/*`의 큰 상한은 키가 있는 요청만 쓴다 |
-| 5 | `_UISecurityHeaders` | 화면 응답에 CSP·nosniff | 응답에만 손댄다 |
+| 바깥 | `_SecurityHeaders` | 모든 응답에 nosniff·`X-Frame-Options: DENY`·CSP(화면용과 API용이 다르다)·`Cross-Origin-Resource-Policy` | 응답에만 손댄다. 가장 바깥이라 위 단계가 만든 401·403에도 붙는다. 허용한 CORS 출처에 답하는 `/v1/*`만 CORP가 `cross-origin`이다 |
 
 **5. CORS는 기본으로 꺼져 있다.** `AXB_CORS_ORIGINS`에 정확히 적은 출처에만 `/v1/*` 응답 머리글을 단다. 와일드카드는 받지 않는다. preflight는 브라우저가 `Authorization`을 붙이지 않으므로 키 없이 204로 답한다.
 

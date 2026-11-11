@@ -383,7 +383,7 @@ export function createConnectView(workspaceId) {
           "div",
           { class: "notice-body" },
           h("p", { class: "notice-title", text: `예시를 복사하면 방금 만든 키 "${freshKey.name}"(${freshKey.prefix})가 채워집니다` }),
-          h("p", { class: "notice-text", text: "키는 화면에 보이지 않고, 5분 뒤나 새로 고치면 잊습니다." }),
+          h("p", { class: "notice-text", text: "키는 화면에 보이지 않고, 5분이 지나거나 탭을 1분 넘게 가려 두거나 새로 고치면 잊습니다." }),
         ),
         h("button", { class: "btn", type: "button", on: { click: () => { forget(); nameInput.focus(); } } }, "지금 잊기"),
       ),

@@ -19,7 +19,7 @@
 - 같은 FastAPI 앱이 내준다. `GET /`은 `index.html`, `GET /static/…`은 그 폴더의 파일이다([`app.py`](../../src/axbuilder/api/app.py)의 `create_app` 끝부분). 화면과 API가 같은 출처라서 CORS 설정이 필요 없고, 기존 Host·`Origin`·`Sec-Fetch-Site` 검사를 그대로 통과한다.
 - XSS는 세 겹으로 막는다.
   1. **코드 규칙**: 서버에서 온 글자는 텍스트 노드로만 넣는다. DOM 도우미 `h()`([`dom.js`](../../src/axbuilder/api/static/js/dom.js))가 문자열 자식을 `createTextNode`로 붙인다. 답변의 `**굵게**`, `- 목록`, `[n]` 인용은 문자열을 토큰으로 잘라 노드를 하나씩 만든다([`answer.js`](../../src/axbuilder/api/static/js/answer.js)). 마크업으로 해석하는 단계가 없다.
-  2. **CSP**: 화면 응답(`/`, `/static/…`)에 `default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'`와 `X-Content-Type-Options: nosniff`를 붙인다(`_UISecurityHeaders`). 규칙 1이 깨져도 인라인 스크립트와 외부 출처 스크립트는 실행되지 않는다. 그래서 `index.html`에도 인라인 `<script>`·`<style>`·`style=""`이 없다.
+  2. **CSP**: 화면 응답(`/`, `/static/…`)에 `default-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'`를 붙인다(`_SecurityHeaders`). `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy`는 API 응답을 포함한 모든 응답에 붙는다. 규칙 1이 깨져도 인라인 스크립트와 외부 출처 스크립트는 실행되지 않는다. 그래서 `index.html`에도 인라인 `<script>`·`<style>`·`style=""`이 없다.
   3. **정적 검사 테스트**: [`tests/api/test_static_ui.py`](../../tests/api/test_static_ui.py)가 `static/`의 모든 텍스트 파일에서 `innerHTML`·`insertAdjacentHTML`·`outerHTML`·`document.write`·`eval(`·`new Function`·외부 URL·`javascript:`·`<style`·`style="`·인라인 이벤트 속성을 찾아 있으면 실패한다. 규칙 1을 사람이 기억하는 대신 CI가 지킨다.
 - 상태 관리는 직접 쓴다. 상태 객체 하나와 `on(이벤트)`/`emit(이벤트)`([`state.js`](../../src/axbuilder/api/static/js/state.js))이 전부다. 서버 호출은 `api.js`, 상태를 바꾸는 동작은 `actions.js`, 화면 조각은 `views/`에 둔다.
 - 프런트엔드 단위 테스트 프레임워크는 넣지 않는다. 대신 (1) 위 정적 검사, (2) 화면이 쓰는 API의 파이썬 테스트([`test_ui_api.py`](../../tests/api/test_ui_api.py)), (3) 브라우저에서 사람이 하는 확인으로 대신한다.
@@ -45,7 +45,7 @@
   - 타입 검사(TypeScript)가 없다.
 - **아직 확인하지 않은 것**
   - 브라우저 자동화 테스트(Playwright 등)는 없다. 접근성(키보드 조작, 화면 낭독기)은 코드로 넣었지만 도구로 감사하지 않았다.
-  - CSP는 `/docs`(Swagger)에는 붙이지 않는다. Swagger 화면이 CDN 스크립트를 쓰기 때문이다. 폐쇄망에서는 `/docs`가 뜨지 않는다.
+  - API 문서 화면(`/docs`, Swagger)은 기본으로 꺼져 있다(`AXB_API_DOCS=true`로 켠다). 외부 CDN 스크립트를 부르고, PR 리뷰에서 다른 사이트의 프레임 안에 떠서 관리 호출이 실행되는 것이 재현됐기 때문이다. 켜면 그 경로에는 프레임 차단과 nosniff만 붙고 CDN 스크립트는 막지 않는다.
 
 ## 면접에서 "왜 이렇게 했냐"고 물으면
 
