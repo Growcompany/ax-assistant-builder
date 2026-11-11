@@ -136,7 +136,9 @@ from openai import OpenAI
 client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="axb_...")
 reply = client.chat.completions.create(
     model="demo",
-    messages=[{"role": "user", "content": "고령 고객의 대리인이 예금을 찾으려면 어떤 서류가 필요한가요?"}],
+    messages=[
+        {"role": "user", "content": "고령 고객의 대리인이 예금을 찾으려면 어떤 서류가 필요한가요?"}
+    ],
 )
 print(reply.choices[0].message.content)
 ```
