@@ -155,6 +155,19 @@ def _report_llm(settings: Settings) -> None:
         print(f"기본 모델: {model} (없음. 받으려면: ollama pull {model})")
 
 
+def _report_reranker(settings: Settings) -> None:
+    if settings.reranker == "none":
+        print("리랭커: 꺼짐")
+        return
+    # qdrant까지 끌어오는 import라 axb --version 같은 가벼운 명령에서는 하지 않는다
+    from axbuilder.retrieval.rerank import RERANKER_MODELS
+
+    print(
+        f"리랭커: {RERANKER_MODELS[settings.reranker]} "
+        f"(후보 {settings.rerank_candidates}개, 처음 질문 때 불러옵니다)"
+    )
+
+
 def open_browser_when_ready(
     url: str,
     port: int,
@@ -211,6 +224,7 @@ def _serve(args: argparse.Namespace) -> int:
     local_host = _local_host(args.host)
     url = None if local_host is None else _url(local_host, args.port)
     _report_llm(settings)
+    _report_reranker(settings)
     if url is not None:
         print(f"화면: {url}  (끝내려면 Ctrl+C)")
     else:

@@ -12,6 +12,8 @@ ENV_NAMES = [
     "AXB_CLAUDE_MODEL",
     "AXB_EMBED_MODEL",
     "AXB_ALLOWED_HOSTS",
+    "AXB_RERANKER",
+    "AXB_RERANK_CANDIDATES",
 ]
 
 
@@ -85,3 +87,55 @@ def test_allowed_hosts_rejects_wildcards_ports_and_urls(monkeypatch, bad):
     monkeypatch.setenv("AXB_ALLOWED_HOSTS", bad)
     with pytest.raises(ValueError):
         Settings.from_env()
+
+
+# ---- 리랭커 (Task 22) ----
+
+
+def test_reranker_is_off_by_default_with_30_candidates():
+    s = Settings.from_env()
+    assert (s.reranker, s.rerank_candidates) == ("none", 30)
+
+
+@pytest.mark.parametrize("key", ["none", "kure-nano", "bge-v2-m3"])
+def test_reranker_from_env(monkeypatch, key):
+    monkeypatch.setenv("AXB_RERANKER", key)
+    monkeypatch.setenv("AXB_RERANK_CANDIDATES", "50")
+    s = Settings.from_env()
+    assert (s.reranker, s.rerank_candidates) == (key, 50)
+
+
+def test_reranker_choices_are_the_models_the_code_knows():
+    from typing import get_args
+
+    from axbuilder.retrieval.rerank import RERANKER_MODELS
+
+    choices = get_args(Settings.model_fields["reranker"].annotation)
+    assert set(choices) == {"none", *RERANKER_MODELS}
+
+
+@pytest.mark.parametrize("bad", ["kure", "KURE-NANO", "nlpai-lab/KURE-Reranker-nano", "true"])
+def test_unknown_reranker_is_a_settings_error(monkeypatch, bad):
+    monkeypatch.setenv("AXB_RERANKER", bad)
+    with pytest.raises(ValueError, match="reranker"):
+        Settings.from_env()
+
+
+@pytest.mark.parametrize("value", ["1", "200"])
+def test_rerank_candidates_range_ends_are_allowed(monkeypatch, value):
+    monkeypatch.setenv("AXB_RERANK_CANDIDATES", value)
+    assert Settings.from_env().rerank_candidates == int(value)
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "201", "many", "30.5"])
+def test_rerank_candidates_out_of_range_is_a_settings_error(monkeypatch, bad):
+    monkeypatch.setenv("AXB_RERANK_CANDIDATES", bad)
+    with pytest.raises(ValueError, match="rerank_candidates"):
+        Settings.from_env()
+
+
+def test_empty_reranker_values_fall_back_to_defaults(monkeypatch):
+    monkeypatch.setenv("AXB_RERANKER", "")
+    monkeypatch.setenv("AXB_RERANK_CANDIDATES", "")
+    s = Settings.from_env()
+    assert (s.reranker, s.rerank_candidates) == ("none", 30)

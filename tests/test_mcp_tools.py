@@ -263,3 +263,71 @@ def test_ask_role_that_is_not_a_string_is_a_readable_error(service, role):
     # 모델이 role에 목록 등을 넣어도 TypeError(unhashable)가 아니라 읽을 수 있는 문장이다
     with pytest.raises(ToolError, match="역할"):
         ask_tool(service, "질문", workspace="bank", role=role)
+
+
+# ---- 리랭커 설정 (Task 22): MCP도 같은 서비스 계층을 쓴다 ----
+
+
+class _ReversingReranker:
+    def __init__(self, model_name: str) -> None:
+        self.name = model_name
+        self.calls: list[list[str]] = []
+
+    def score(self, question: str, passages: list[str]) -> list[float]:
+        self.calls.append(list(passages))
+        return [float(i) for i in range(len(passages))]
+
+
+def test_reranker_setting_applies_to_mcp_asks(prepared, monkeypatch):
+    import axbuilder.api.app as app_module
+
+    made = []
+
+    def make(model_name: str):
+        made.append(_ReversingReranker(model_name))
+        return made[-1]
+
+    monkeypatch.setattr(app_module, "CrossEncoderReranker", make)
+    question = "상담원 내부 절차 확인"
+
+    plain = create_service(prepared, llm=CiteEverythingLLM(), embedder=HashEmbedder())
+    try:
+        before = ask_tool(plain, question, workspace="bank", role="상담원")
+    finally:
+        plain.close()
+    assert made == []  # 꺼져 있으면 만들지 않는다
+
+    # axb mcp가 하는 것과 같다: 설정만 넘긴다(리랭커를 따로 넣지 않는다)
+    on = prepared.model_copy(update={"reranker": "kure-nano"})
+    service = create_service(on, llm=CiteEverythingLLM(), embedder=HashEmbedder())
+    try:
+        after = ask_tool(service, question, workspace="bank", role="상담원")
+    finally:
+        service.close()
+    (reranker,) = made
+    assert reranker.name == "nlpai-lab/KURE-Reranker-nano"
+    (passages,) = reranker.calls
+    assert len(passages) == 3 and all(INTERNAL_MARK not in text for text in passages)
+    ids = [p["chunk_id"] for p in before["passages"]]
+    # 가짜 리랭커가 base 순위를 뒤집었다
+    assert len(ids) == 3 and [p["chunk_id"] for p in after["passages"]] == ids[::-1]
+
+
+def test_reranker_unavailable_is_a_readable_mcp_error(prepared):
+    from axbuilder.retrieval.rerank import RerankerUnavailableError
+
+    class Broken:
+        name = "x/y"
+
+        def score(self, question: str, passages: list[str]) -> list[float]:
+            raise RerankerUnavailableError("cannot load reranker model x/y: OSError: nope")
+
+    service = create_service(
+        prepared, llm=CiteEverythingLLM(), embedder=HashEmbedder(), reranker=Broken()
+    )
+    try:
+        with pytest.raises(ToolError, match="리랭커를 불러오지 못했습니다") as error:
+            ask_tool(service, "보호 한도?", workspace="bank", role="상담원")
+    finally:
+        service.close()
+    assert "x/y" in str(error.value) and "AXB_RERANKER" in str(error.value)

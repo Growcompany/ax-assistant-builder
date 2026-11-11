@@ -22,8 +22,9 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from axbuilder.api.app import IndexNotReadyError, create_service
+from axbuilder.api.app import IndexNotReadyError, create_service, reranker_unavailable_detail
 from axbuilder.generation.llm import LLMUnavailableError
+from axbuilder.retrieval.rerank import RerankerUnavailableError
 from axbuilder.settings import Settings
 from axbuilder.workspace import WorkspaceNotFoundError, is_valid_workspace_id
 
@@ -118,6 +119,9 @@ def ask_tool(
         raise ToolError(f"색인이 준비되지 않았습니다: {e}") from None
     except LLMUnavailableError as e:
         raise ToolError(f"LLM을 사용할 수 없습니다: {e}") from None
+    except RerankerUnavailableError as e:
+        # 이 명령을 실행한 사람이 설정한 사람이다: 원인과 해결 방법을 그대로 보여 준다
+        raise ToolError(reranker_unavailable_detail(e)) from None
     except HTTPException as e:
         raise ToolError(str(e.detail)) from None
     return response.model_dump(mode="json")

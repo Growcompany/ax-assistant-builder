@@ -43,7 +43,14 @@ def served(monkeypatch, tmp_path):
     monkeypatch.setattr(cli.uvicorn, "run", fake_run)
     monkeypatch.setattr(cli, "open_browser_when_ready", fake_open_later)
     monkeypatch.setattr(cli, "list_ollama_models", fake_models)
-    for name in ("AXB_DATA_DIR", "AXB_LLM_MODE", "AXB_OLLAMA_URL", "AXB_LOCAL_MODEL"):
+    for name in (
+        "AXB_DATA_DIR",
+        "AXB_LLM_MODE",
+        "AXB_OLLAMA_URL",
+        "AXB_LOCAL_MODEL",
+        "AXB_RERANKER",
+        "AXB_RERANK_CANDIDATES",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)  # 기본 data_dir("data")가 저장소에 생기지 않게
     return record
@@ -323,3 +330,44 @@ def test_browser_probe_uses_the_given_host(monkeypatch):
         "http://[::1]:8123", 8123, timeout=0.1, interval=0.01, host="::1"
     ).join(5)
     assert seen and set(seen) == {("::1", 8123)}
+
+
+# ---- 리랭커 시작 줄 (Task 22) ----
+
+
+def reranker_lines(out: str) -> list[str]:
+    return [line for line in out.splitlines() if line.startswith("리랭커")]
+
+
+def test_serve_says_the_reranker_is_off_by_default(served, capsys):
+    assert cli.main(["serve", "--port", str(free_port()), "--no-browser"]) == 0
+    assert reranker_lines(capsys.readouterr().out) == ["리랭커: 꺼짐"]
+
+
+def test_serve_names_the_reranker_model_and_candidates(served, monkeypatch, capsys):
+    monkeypatch.setenv("AXB_RERANKER", "kure-nano")
+    assert cli.main(["serve", "--port", str(free_port()), "--no-browser"]) == 0
+    assert reranker_lines(capsys.readouterr().out) == [
+        "리랭커: nlpai-lab/KURE-Reranker-nano (후보 30개, 처음 질문 때 불러옵니다)"
+    ]
+    assert len(served["run"]) == 1  # 모델을 불러오지 않고 뜬다
+
+
+def test_serve_shows_the_configured_candidates(served, monkeypatch, capsys):
+    monkeypatch.setenv("AXB_RERANKER", "bge-v2-m3")
+    monkeypatch.setenv("AXB_RERANK_CANDIDATES", "50")
+    assert cli.main(["serve", "--port", str(free_port()), "--no-browser"]) == 0
+    assert reranker_lines(capsys.readouterr().out) == [
+        "리랭커: BAAI/bge-reranker-v2-m3 (후보 50개, 처음 질문 때 불러옵니다)"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "value"), [("AXB_RERANKER", "best"), ("AXB_RERANK_CANDIDATES", "0")]
+)
+def test_serve_bad_reranker_settings_do_not_start(served, monkeypatch, capsys, name, value):
+    monkeypatch.setenv(name, value)
+    assert cli.main(["serve", "--port", str(free_port()), "--no-browser"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("설정 오류:") and "rerank" in captured.err
+    assert "Traceback" not in captured.err and served["run"] == []

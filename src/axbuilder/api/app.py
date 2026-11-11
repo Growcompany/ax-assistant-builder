@@ -17,6 +17,10 @@ index/의 Qdrant 색인을 열고, 그 안의 청크로 BM25를 다시 만든다
 임베더가 바뀌었거나 색인이 덜 만들어졌으면 409로 다시 색인하라고 알린다. 문서를 올린 뒤에는
 POST /index를 다시 불러야 질문에 반영된다.
 
+리랭커(Settings.reranker, 기본 none)를 켜면 질문마다 워크스페이스 검색기를 RerankRetriever로
+감싼다. 리랭커는 서버에 하나이고 처음 질문 때 불러온다. 색인과는 무관하다(다시 색인하지 않는다).
+불러오지 못하면 503이다: 리랭커 없이 답하지 않는다.
+
 화면(static/)도 이 앱이 내준다: GET /은 static/index.html, GET /static/…은 그 폴더의 파일.
 화면이 쓰는 조회 API(GET /workspaces, GET /workspaces/{id})는 색인을 열지 않고 파일만 읽는다.
 
@@ -103,7 +107,14 @@ from axbuilder.ingest.loaders import DocumentTooLargeError, load_document
 from axbuilder.models import Chunk, Citation, DocMeta, LLMResponse, ScoredChunk
 from axbuilder.retrieval.bm25 import BM25Index
 from axbuilder.retrieval.dense import DenseIndex, Embedder
-from axbuilder.retrieval.hybrid import HybridRetriever
+from axbuilder.retrieval.hybrid import HybridRetriever, Retriever
+from axbuilder.retrieval.rerank import (
+    RERANKER_MODELS,
+    CrossEncoderReranker,
+    Reranker,
+    RerankerUnavailableError,
+    RerankRetriever,
+)
 from axbuilder.settings import Settings
 from axbuilder.workspace import (
     CONFIG_NAME,
@@ -198,6 +209,21 @@ class IndexNotReadyError(Exception):
 
 class EmbedderUnavailableError(RuntimeError):
     """임베딩 모델을 불러올 수 없다 (503). 메시지에 해결 방법을 담는다."""
+
+
+class _SerialReranker:
+    """리랭커를 한 번에 한 요청만 쓰게 한다. 모델은 서버에 하나라 워크스페이스 잠금으로는
+    막지 못한다: 동시에 온 첫 질문들이 모델을 두 번 올리거나 GPU 메모리를 함께 쓰지 않게.
+    """
+
+    def __init__(self, inner: Reranker) -> None:
+        self.inner = inner
+        self.name = inner.name
+        self._lock = threading.Lock()
+
+    def score(self, question: str, passages: list[str]) -> list[float]:
+        with self._lock:
+            return self.inner.score(question, passages)
 
 
 _CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f\u2028\u2029]")  # 제어 문자와 유니코드 줄 구분자
@@ -389,6 +415,15 @@ def _public_message(text: str) -> str:
     return text
 
 
+def reranker_unavailable_detail(exc: RerankerUnavailableError) -> str:
+    """리랭커를 불러오지 못했을 때 이 PC의 관리자에게 보여 줄 문장(원인과 해결 방법)."""
+    return (
+        f"리랭커를 불러오지 못했습니다: {_public_message(str(exc))}. "
+        'ml 의존성(pip install -e ".[ml]"), AXB_RERANKER, GPU 상태를 확인하세요. '
+        "리랭커 없이 답하게 하려면 AXB_RERANKER=none 으로 서버를 다시 띄우세요"
+    )
+
+
 def _size_label(n: int) -> str:
     return f"{n // (1024 * 1024)}MB" if n >= 1024 * 1024 else f"{n}바이트"
 
@@ -460,6 +495,7 @@ class _Service:
         embedder: Embedder | None,
         llm_factory: Callable[[str], LLMClient] | None = None,
         ollama_transport: httpx.BaseTransport | None = None,
+        reranker: Reranker | None = None,
     ):
         self.store = WorkspaceStore(settings.data_dir / "workspaces")
         self.keys = KeyStore(self.store)
@@ -487,6 +523,12 @@ class _Service:
         else:
             self._embedder_name = type(embedder).__name__
         self._embedder_lock = threading.Lock()
+        # 리랭커는 서버 전체에 하나다(워크스페이스마다 모델을 올리지 않는다). 넣어 준 것이
+        # 설정보다 우선한다. 색인 정보에는 남기지 않는다: 색인을 바꾸지 않는다
+        self._reranker_model = RERANKER_MODELS.get(settings.reranker)
+        self._rerank_candidates = settings.rerank_candidates
+        self._reranker = _SerialReranker(reranker) if reranker is not None else None
+        self._reranker_lock = threading.Lock()
         self._parse_slots = threading.BoundedSemaphore(MAX_CONCURRENT_PARSES)
         self._guard = threading.Lock()
         # 워크스페이스마다 잠금 하나: 색인 만들기·다시 열기·검색·문서 등록을 차례로 한다.
@@ -613,6 +655,24 @@ class _Service:
                         "AXB_EMBED_MODEL, GPU 상태를 확인하세요"
                     ) from e
             return self._embedder
+
+    def _retriever(self, workspace_id: str) -> Retriever:
+        """질문 하나에 쓸 검색기. 리랭커가 꺼져 있으면 워크스페이스 검색기 그대로다."""
+        base = _WorkspaceRetriever(self, workspace_id)
+        if self._reranker is None and self._reranker_model is None:
+            return base
+        # 바깥에서 감싼다: 워크스페이스 잠금은 base 검색 동안만 잡히고 리랭크는 잠금 밖에서
+        # 돈다. 권한 등급은 base로만 넘어가고, 리랭커는 걸러진 청크의 본문만 받는다
+        return RerankRetriever(base, self._get_reranker(), self._rerank_candidates)
+
+    def _get_reranker(self) -> Reranker:
+        with self._reranker_lock:
+            if self._reranker is None:
+                assert self._reranker_model is not None
+                # 여기서는 모델을 올리지 않는다. 첫 score() 때 올리고, 실패하면
+                # RerankerUnavailableError(503)다. 리랭커 없이 답하지 않는다
+                self._reranker = _SerialReranker(CrossEncoderReranker(self._reranker_model))
+            return self._reranker
 
     # ---- 문서 ----
 
@@ -963,7 +1023,7 @@ class _Service:
         started = time.perf_counter()
         # 권한 필터(역할 → 접근 등급)는 answer()가 검색 단계에서 건다. 볼 수 없는 문서는
         # 검색 결과에도, LLM 프롬프트에도 들어가지 않는다
-        result = answer(question, _WorkspaceRetriever(self, ws.id), self.llm_for(ws), ws, role)
+        result = answer(question, self._retriever(ws.id), self.llm_for(ws), ws, role)
         # 원문은 이 질문에서 이 역할로 검색된 청크(result.retrieved)에서만 찾는다. 색인 전체에서
         # chunk_id로 찾지 않는다: 권한 밖 문서의 본문이 나갈 길을 만들지 않는다
         texts = {scored.chunk.chunk_id: scored.chunk.text for scored in result.retrieved}
@@ -1195,9 +1255,10 @@ def create_service(
     *,
     llm_factory: Callable[[str], LLMClient] | None = None,
     ollama_transport: httpx.BaseTransport | None = None,
+    reranker: Reranker | None = None,
 ) -> _Service:
     """HTTP 없이 같은 서비스 계층을 쓴다(MCP 서버). 인자는 create_app과 같다. 다 쓰면 close()."""
-    return _Service(settings, llm, embedder, llm_factory, ollama_transport)
+    return _Service(settings, llm, embedder, llm_factory, ollama_transport, reranker)
 
 
 def create_app(
@@ -1207,6 +1268,7 @@ def create_app(
     *,
     llm_factory: Callable[[str], LLMClient] | None = None,
     ollama_transport: httpx.BaseTransport | None = None,
+    reranker: Reranker | None = None,
 ) -> FastAPI:
     """llm이 없으면 설정대로 모델별 클라이언트(local: OllamaClient, cloud: ClaudeClient)를 만들고,
     embedder가 없으면 SentenceTransformerEmbedder(설정의 embed_model)를 쓴다. 임베딩 모델은 처음
@@ -1214,8 +1276,12 @@ def create_app(
 
     테스트용: llm을 주면 모든 워크스페이스가 그것으로 답한다. llm_factory(모델 이름)를 주면 모델별
     클라이언트를 그것으로 만든다. ollama_transport는 Ollama로 가는 요청(모델 목록, 기본 공장의
-    OllamaClient)에 쓴다."""
-    service = _Service(settings, llm, embedder, llm_factory, ollama_transport)
+    OllamaClient)에 쓴다. reranker를 주면 설정(Settings.reranker)과 무관하게 그것으로 검색
+    결과를 다시 줄 세운다.
+
+    리랭커(설정의 reranker가 none이 아닐 때)는 서버에 하나만 두고 처음 질문할 때 불러온다.
+    불러오지 못하면 503이다(리랭커 없이 답하지 않는다)."""
+    service = _Service(settings, llm, embedder, llm_factory, ollama_transport, reranker)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -1278,6 +1344,15 @@ def create_app(
         logger.warning("embedder unavailable: %s", exc)
         detail = _public_message(str(exc))
         return error(request, 503, detail, "embedder_unavailable", V1_SEARCH_UNAVAILABLE)
+
+    @app.exception_handler(RerankerUnavailableError)
+    async def _reranker_unavailable(
+        request: Request, exc: RerankerUnavailableError
+    ) -> JSONResponse:
+        # 리랭커는 검색의 한 단계다: 밖으로는 임베더 실패와 같은 문구만 나간다
+        logger.warning("reranker unavailable: %s", exc)
+        detail = reranker_unavailable_detail(exc)
+        return error(request, 503, detail, "reranker_unavailable", V1_SEARCH_UNAVAILABLE)
 
     @app.exception_handler(IndexNotReadyError)
     async def _index_not_ready(request: Request, exc: IndexNotReadyError) -> JSONResponse:
