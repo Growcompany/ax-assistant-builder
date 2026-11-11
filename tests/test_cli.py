@@ -84,11 +84,31 @@ def test_serve_defaults():
     assert args.port == 8000 and args.no_browser is False and args.data_dir is None
 
 
-def test_serve_has_no_host_option(capsys):
-    # 127.0.0.1 고정. 외부 공개는 Task 16에서 다룬다
+def test_serve_host_defaults_to_loopback():
+    assert cli.build_parser().parse_args(["serve"]).host == "127.0.0.1"
+
+
+@pytest.mark.parametrize("host", ["localhost", "example.com", "*", ""])
+def test_serve_host_must_be_an_ip_address(served, host):
     with pytest.raises(SystemExit) as exit_info:
-        cli.main(["serve", "--host", "0.0.0.0"])
-    assert exit_info.value.code == 2
+        cli.main(["serve", "--host", host])
+    assert exit_info.value.code == 2 and served["run"] == []
+
+
+def test_serve_on_another_address_says_what_outside_clients_can_do(served, capsys):
+    # Task 16: 밖에서는 API 키로 /v1/* 만. 브라우저는 여전히 이 PC 주소로 연다
+    port = free_port()
+    assert cli.main(["serve", "--host", "0.0.0.0", "--port", str(port)]) == 0
+    ((_, kwargs),) = served["run"]
+    assert kwargs["host"] == "0.0.0.0" and kwargs["port"] == port
+    assert served["browser"] == [(f"http://127.0.0.1:{port}", port)]
+    out = capsys.readouterr().out
+    assert "/v1/*" in out and "AXB_ALLOWED_HOSTS" in out
+
+
+def test_serve_on_loopback_does_not_print_the_outside_notice(served, capsys):
+    assert cli.main(["serve", "--port", str(free_port()), "--no-browser"]) == 0
+    assert "AXB_ALLOWED_HOSTS" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("port", ["0", "-1", "65536", "abc"])
@@ -104,6 +124,9 @@ def test_serve_no_browser_runs_uvicorn_on_loopback(served, capsys):
     ((app, kwargs),) = served["run"]
     assert isinstance(app, FastAPI)
     assert kwargs["host"] == "127.0.0.1" and kwargs["port"] == port
+    # 환경변수 FORWARDED_ALLOW_IPS="*"가 있어도 밖에서 온 요청이 X-Forwarded-For로 이 PC인 척할
+    # 수 없게 고정한다
+    assert kwargs["forwarded_allow_ips"] == "127.0.0.1"
     assert served["browser"] == []
     assert f"http://127.0.0.1:{port}" in capsys.readouterr().out
 
