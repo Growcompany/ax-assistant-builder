@@ -1,6 +1,7 @@
 """평가 실행기: run_eval(검색 지표 / LLM 답변 지표)과 CLI 보조 함수."""
 
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -10,6 +11,7 @@ import yaml
 from axbuilder.eval.dataset import Evidence, GoldItem
 from axbuilder.eval.run import (
     EvalReport,
+    build_retriever,
     format_markdown,
     load_corpus_chunks,
     main,
@@ -19,6 +21,8 @@ from axbuilder.eval.run import (
 from axbuilder.generation.answer import REFUSAL_TEXT
 from axbuilder.generation.llm import FakeLLM, LLMResponse, LLMUnavailableError
 from axbuilder.models import Chunk, ScoredChunk
+from axbuilder.retrieval.dense import HashEmbedder
+from axbuilder.retrieval.rerank import RerankerUnavailableError, RerankRetriever
 from axbuilder.workspace import Workspace
 
 ws = Workspace(
@@ -173,10 +177,101 @@ def test_with_llm_scores_answers_on_every_item(fake_retriever):
         "n": 1,
         "citation_precision": 0.0,
         "refusal_accuracy": 0.0,
+        "refusal_accuracy_strict": 0.0,  # Task 20에서 더한 지표
+        # 근거 기준 지표와 내역(Task 20): 근거가 없는데(범위 밖) 답했다
+        "grounded_refusal_accuracy": 0.0,
+        "over_refusals": 0,
+        "grounded_refusals": 0,
+        "ungrounded_answers": 1,
     }
     oos = report.items[2]
     assert oos["refused"] is False and oos["refusal_correct"] is False
     assert oos["citations"] == [law1.chunk_id] and oos["recall_at_k"] is None
+    assert oos["refusal_kind"] == "none" and oos["raw_answer"] == "답입니다 [1]."
+
+
+# 문구를 바꿔 말한 거절(Task 20). 범위 밖 질문에만 이렇게 답하는 가짜 LLM으로 전후를 가른다
+PARAPHRASED = "제공된 자료로는 신용카드 연회비를 확인할 수 없습니다. [1]에는 그 정보가 없습니다."
+
+
+class ParaphrasingLLM(FakeLLM):
+    """범위 밖 문항(q3)에만 문구를 바꿔 거절하고, 나머지는 인용을 달아 답한다."""
+
+    def generate(self, system: str, user: str, max_tokens: int = 2048) -> LLMResponse:
+        response = super().generate(system, user, max_tokens)
+        question = user.rsplit("[질문]\n", 1)[-1]
+        text = PARAPHRASED if question.strip() == "q3" else "답입니다 [1]."
+        return response.model_copy(update={"text": text})
+
+
+def test_paraphrased_refusal_counts_as_refusal_but_not_in_strict(fake_retriever):
+    report = run_eval(
+        items_with_one_oos,
+        fake_retriever,
+        k=5,
+        llm=ParaphrasingLLM("unused"),
+        workspace=ws,
+        role="준법감시",
+    )
+    oos = report.items[2]
+    assert oos["refusal_kind"] == "paraphrase" and oos["refused"] is True
+    assert oos["refusal_correct"] is True and oos["refusal_correct_strict"] is False
+    # 화면에 나가는 답은 정해진 문구이고 인용은 없다. 모델이 쓴 말은 raw_answer에 남는다
+    assert oos["answer"] == REFUSAL_TEXT and oos["citations"] == []
+    assert oos["raw_answer"] == PARAPHRASED == oos["llm"]["text"]
+    # 새 판정은 3/3, 문구 일치만 세면 범위 밖 1문항이 틀려 2/3
+    assert report.refusal_accuracy == 1.0
+    assert report.refusal_accuracy_strict == pytest.approx(2 / 3)
+    assert report.by_qtype["out_of_scope"] == {
+        "n": 1,
+        "refusal_accuracy": 1.0,
+        "refusal_accuracy_strict": 0.0,
+        "grounded_refusal_accuracy": 1.0,
+        "over_refusals": 0,
+        "grounded_refusals": 1,
+        "ungrounded_answers": 0,
+    }
+    lines = format_markdown(report).splitlines()
+    assert "| out_of_scope | 1 | 0 | - | - | 0 | - | 1.000 | 0.000 | 1.000 |" in lines
+
+
+def test_exact_refusal_is_the_same_in_both_metrics(fake_retriever):
+    report = run_eval(
+        items_with_one_oos,
+        fake_retriever,
+        k=5,
+        llm=FakeLLM(f"{REFUSAL_TEXT} 자료에 없습니다."),
+        workspace=ws,
+        role="준법감시",
+    )
+    assert [r["refusal_kind"] for r in report.items] == ["exact"] * 3
+    assert report.refusal_accuracy == report.refusal_accuracy_strict == pytest.approx(1 / 3)
+    assert report.items[0]["raw_answer"] == f"{REFUSAL_TEXT} 자료에 없습니다."
+
+
+def test_refusal_without_llm_call_is_exact_with_no_raw_answer(fake_retriever):
+    # 볼 수 있는 등급이 없는 역할: 검색도 LLM 호출도 없이 정해진 문구로 거절한다
+    report = run_eval(
+        items_with_one_oos, fake_retriever, k=5, llm=FakeLLM("x"), workspace=ws, role="견학생"
+    )
+    assert [r["refusal_kind"] for r in report.items] == ["exact"] * 3
+    assert all(r["raw_answer"] is None and r["llm"] is None for r in report.items)
+    assert report.refusal_accuracy == report.refusal_accuracy_strict
+
+
+def test_report_without_strict_field_still_loads():
+    # v0.2.0까지의 보고서에는 refusal_accuracy_strict가 없다
+    old = {
+        "config": {},
+        "n": 1,
+        "recall_at_k": 1.0,
+        "mrr": 1.0,
+        "citation_precision": None,
+        "refusal_accuracy": 0.5,
+        "by_qtype": {},
+        "items": [],
+    }
+    assert EvalReport.model_validate(old).refusal_accuracy_strict is None
 
 
 def test_with_llm_refusing_everything(fake_retriever):
@@ -247,9 +342,13 @@ def test_format_markdown_has_overall_qtype_and_article_only_rows(fake_retriever)
 def test_format_markdown_with_llm_shows_each_metric_denominator(fake_retriever):
     # LLM 표는 지표마다 분모가 다르다: Recall·MRR은 근거가 있는 문항, 인용 정밀도는 인용한 문항
     lines = format_markdown(report_for(fake_retriever)).splitlines()
-    assert "| 구분 | n | 근거 n | Recall@5 | MRR | 인용 n | 인용 정밀도 | 거절 정확도 |" in lines
-    assert "| 전체 | 3 | 2 | 0.500 | 0.500 | 3 | 0.333 | 0.667 |" in lines
-    assert "| out_of_scope | 1 | 0 | - | - | 1 | 0.000 | 0.000 |" in lines
+    # 마지막 열(문구 일치만 센 거절 정확도)은 Task 20에서 더했다. 앞의 열은 그대로다
+    assert (
+        "| 구분 | n | 근거 n | Recall@5 | MRR | 인용 n | 인용 정밀도 | 거절 정확도 "
+        "| 거절 정확도(문구 일치만) | 근거 기준 거절 정확도 |"
+    ) in lines
+    assert "| 전체 | 3 | 2 | 0.500 | 0.500 | 3 | 0.333 | 0.667 | 0.667 | 0.333 |" in lines
+    assert "| out_of_scope | 1 | 0 | - | - | 1 | 0.000 | 0.000 | 0.000 | 0.000 |" in lines
     refusing = run_eval(
         items_with_one_oos,
         fake_retriever,
@@ -259,7 +358,8 @@ def test_format_markdown_with_llm_shows_each_metric_denominator(fake_retriever):
         role="준법감시",
     )
     # 모두 거절하면 인용한 문항이 없어 인용 정밀도를 잴 수 없다
-    assert "| 전체 | 3 | 2 | 0.500 | 0.500 | 0 | - | 0.333 |" in format_markdown(refusing)
+    text = format_markdown(refusing)
+    assert "| 전체 | 3 | 2 | 0.500 | 0.500 | 0 | - | 0.333 | 0.333 | 0.667 |" in text
 
 
 def test_format_markdown_retrieval_only_has_no_answer_columns(fake_retriever):
@@ -438,3 +538,311 @@ def test_cli_llm_failure_mid_run_saves_no_report(tmp_path, monkeypatch, capsys):
     assert not list(reports.glob("**/*.json"))
     err = capsys.readouterr().err
     assert "LLM unavailable: bank-001 (0/2 scored)" in err and "not reachable" in err
+
+
+# --- 리랭커 (M-2 Task 21) ---
+
+# main()이 보고서 config에 남기는 키와 순서. --reranker none이면 v0.2.0과 같아야 한다
+CONFIG_KEYS_WITHOUT_RERANKER = [
+    "workspace",
+    "role",
+    "access_levels",
+    "k",
+    "with_llm",
+    "golden_items",
+    "retriever",
+    "retriever_params",
+    "embed_model",
+    "llm_mode",
+    "llm_model",
+    "n_docs",
+    "n_chunks",
+    "golden",
+    "golden_sha256",
+    "corpus_sha256",
+    "commit",
+    "started_at",
+]
+TIMING_KEYS = [
+    "load_seconds",
+    "model_load_seconds",
+    "index_seconds",
+    "warmup_seconds",
+    "eval_seconds",
+    "mean_latency_ms",
+    "median_latency_ms",
+    "max_latency_ms",
+    "total_seconds",
+]
+CALLBACK_QUESTION = "콜백 요청은 몇 시간 안에 처리해야 하나요?"
+
+
+class FakeReranker:
+    """뒤에 온 후보일수록 높은 점수(순서를 뒤집는다). 본문이 30자를 넘으면 잘린 것으로 센다."""
+
+    name = "fake/reranker"
+
+    def __init__(self) -> None:
+        self.truncated = 0
+        self.scored = 0
+        self.calls: list[tuple[str, list[str]]] = []
+
+    def score(self, question: str, passages: list[str]) -> list[float]:
+        self.calls.append((question, list(passages)))
+        self.truncated += sum(len(p) > 30 for p in passages)
+        self.scored += len(passages)
+        return [float(i) for i in range(len(passages))]
+
+
+def use_reranker(monkeypatch, reranker) -> list[str]:
+    """main()이 실제 모델 대신 가짜 리랭커를 받게 하고, 요청된 선택지를 기록한다."""
+    requested: list[str] = []
+
+    def fake_make_reranker(key: str):
+        requested.append(key)
+        return reranker
+
+    monkeypatch.setattr("axbuilder.eval.run.make_reranker", fake_make_reranker)
+    return requested
+
+
+def write_two_hit_corpus(root: Path) -> Path:
+    """평가 질문에 BM25가 두 조항을 돌려주고, 예열 질문("예금")에도 한 조항이 걸리는 문서."""
+    corpus = write_corpus(root, with_url_doc=False)
+    (corpus / "internal" / "guide.md").write_text(
+        "제1조(목적) 이 지침은 콜백 응대 원칙을 정한다.\n"
+        "제2조(콜백) 콜백 요청은 4시간 안에 처리한다. 콜백 기록은 상담 이력에 남긴다.\n"
+        "제3조(예금) 예금 상담은 영업시간에 한다.\n",
+        encoding="utf-8",
+    )
+    return corpus
+
+
+def stable(report: EvalReport) -> str:
+    """실행할 때마다 달라지는 값(시각·소요 시간)을 뺀 보고서 JSON."""
+    data = report.model_dump()
+    data["timing"] = list(data["timing"])
+    data["config"]["started_at"] = None
+    for item in data["items"]:
+        item["latency_ms"] = None
+    return json.dumps(data, ensure_ascii=False)
+
+
+def test_cli_reranker_none_leaves_the_report_unchanged(tmp_path, monkeypatch, capsys):
+    corpus = write_corpus(tmp_path, with_url_doc=False)
+    monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path / "data"))
+    requested = use_reranker(monkeypatch, FakeReranker())
+    outputs = []
+    for name, extra in (("default", ()), ("explicit", ("--reranker", "none"))):
+        reports = tmp_path / name
+        assert main(cli_args(corpus, reports, *extra)) == 0
+        (saved,) = (reports / "bank").glob("*.json")
+        assert saved.name.endswith("-bm25.json") and "+" not in saved.name
+        report = EvalReport.model_validate_json(saved.read_text(encoding="utf-8"))
+        head = capsys.readouterr().out.splitlines()[0]
+        outputs.append((stable(report), head))
+        # 리랭커가 없으면 새 필드를 넣지 않는다: 키와 순서가 v0.2.0 보고서와 같다
+        assert list(report.config) == CONFIG_KEYS_WITHOUT_RERANKER
+        assert list(report.timing) == TIMING_KEYS
+        assert report.timing["model_load_seconds"] == 0.0
+        assert head == "### bank · bm25 · k=5 · role=준법감시 (public, internal)"
+    assert outputs[0] == outputs[1]
+    assert requested == []  # 리랭커를 만들지도 않는다
+
+
+def test_cli_with_reranker_wraps_the_retriever_and_records_it(tmp_path, monkeypatch, capsys):
+    corpus = write_two_hit_corpus(tmp_path)
+    monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path / "data"))
+    reranker = FakeReranker()
+    requested = use_reranker(monkeypatch, reranker)
+    reports = tmp_path / "reports"
+    assert main(cli_args(corpus, reports, "--reranker", "kure-nano")) == 0
+    assert requested == ["kure-nano"]
+    (saved,) = (reports / "bank").glob("*.json")
+    assert saved.name.endswith("-bm25+kure-nano-c30.json")
+    report = EvalReport.model_validate_json(saved.read_text(encoding="utf-8"))
+    config = report.config
+    assert list(config) == [
+        *CONFIG_KEYS_WITHOUT_RERANKER,
+        "reranker",
+        "candidates",
+        "rerank_truncated",
+        "rerank_pairs",
+    ]
+    assert list(report.timing) == TIMING_KEYS
+    assert config["retriever"] == "bm25"  # base 검색기 이름은 그대로
+    assert config["reranker"] == "fake/reranker" and config["candidates"] == 30
+    # 호출 3번: 모델 적재 1 + 검색 예열 1 + 문항 1(범위 밖 문항은 검색 지표에서 빠진다)
+    assert [question for question, _ in reranker.calls][2:] == [CALLBACK_QUESTION]
+    assert len(reranker.calls) == 3
+    # 보고서에는 평가 문항에서 넘긴 쌍만 센다(적재·예열 호출 제외). 제2조만 30자를 넘는다
+    assert config["rerank_pairs"] == len(reranker.calls[-1][1]) == 2
+    assert config["rerank_truncated"] == 1
+    assert reranker.scored > config["rerank_pairs"]
+    # 점수는 리랭커 점수이고 순서는 리랭커가 뒤집은 순서다(BM25 1위인 정답 제2조가 2위로)
+    (item,) = report.items
+    assert [r["score"] for r in item["retrieved"]] == [1.0, 0.0]
+    assert item["retrieved"][1]["article"] == "제2조" and item["reciprocal_rank"] == 0.5
+    assert report.timing["model_load_seconds"] > 0.0  # 리랭커 첫 호출(모델 적재) 시간
+    out = capsys.readouterr().out
+    assert out.splitlines()[0] == (
+        "### bank · bm25 + fake/reranker (candidates=30) · k=5 · role=준법감시 (public, internal)"
+    )
+    assert "rerank_truncated=1 · rerank_pairs=2" in out
+
+
+def test_cli_candidates_is_the_number_of_passages_the_reranker_gets(tmp_path, monkeypatch):
+    corpus = write_two_hit_corpus(tmp_path)
+    monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path / "data"))
+    reranker = FakeReranker()
+    use_reranker(monkeypatch, reranker)
+    reports = tmp_path / "reports"
+    args = cli_args(corpus, reports, "--reranker", "bge-v2-m3", "--candidates", "1")
+    args[args.index("--k") + 1] = "1"
+    assert main(args) == 0
+    (saved,) = (reports / "bank").glob("*-bm25+bge-v2-m3-c1.json")
+    report = EvalReport.model_validate_json(saved.read_text(encoding="utf-8"))
+    assert report.config["candidates"] == 1 and report.config["rerank_pairs"] == 1
+    assert len(reranker.calls[-1][1]) == 1  # 두 조항이 걸리지만 리랭커는 BM25 1위만 받는다
+
+
+@pytest.mark.parametrize(
+    ("extra", "message"),
+    [
+        (("--candidates", "50"), "--candidates needs --reranker"),
+        (("--reranker", "kure-nano", "--candidates", "0"), "--candidates must be >= 1"),
+    ],
+)
+def test_cli_rejects_bad_candidates(tmp_path, monkeypatch, capsys, extra, message):
+    corpus = write_corpus(tmp_path, with_url_doc=False)
+    monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path / "data"))
+    requested = use_reranker(monkeypatch, FakeReranker())
+    with pytest.raises(SystemExit) as exc:
+        main(cli_args(corpus, tmp_path / "reports", *extra))
+    assert exc.value.code == 2 and message in capsys.readouterr().err
+    assert requested == []
+
+
+def test_cli_reranker_unavailable_saves_no_report(tmp_path, monkeypatch, capsys):
+    # Review Focus 5: 모델을 못 불러오면 읽을 수 있는 오류로 끝난다
+    class BrokenReranker(FakeReranker):
+        def score(self, question: str, passages: list[str]) -> list[float]:
+            raise RerankerUnavailableError("cannot load reranker model x/y: OSError: no such model")
+
+    corpus = write_corpus(tmp_path, with_url_doc=False)
+    monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path / "data"))
+    use_reranker(monkeypatch, BrokenReranker())
+    reports = tmp_path / "reports"
+    assert main(cli_args(corpus, reports, "--reranker", "kure-nano")) == 1
+    assert not list(reports.glob("**/*.json"))
+    assert "reranker unavailable: cannot load reranker model x/y" in capsys.readouterr().err
+
+
+def test_latency_includes_reranking(fake_retriever):
+    class SlowReranker(FakeReranker):
+        def score(self, question: str, passages: list[str]) -> list[float]:
+            time.sleep(0.03)
+            return super().score(question, passages)
+
+    retriever = RerankRetriever(fake_retriever, SlowReranker())
+    report = run_eval(items_with_one_oos, retriever, k=5, llm=None, workspace=ws, role="준법감시")
+    assert all(item["latency_ms"] >= 25 for item in report.items)  # 타이머 오차 여유
+    assert report.timing["mean_latency_ms"] >= 25
+
+
+def test_build_retriever_hybrid_fetches_at_least_min_candidates(monkeypatch):
+    # 리랭커에 50개를 넘기려면 hybrid가 BM25·dense에서 50개씩 받아 합쳐야 한다
+    monkeypatch.setattr(
+        "axbuilder.retrieval.dense.SentenceTransformerEmbedder", lambda model_name: HashEmbedder()
+    )
+    chunks = [law1, law2, prod]
+    default, params, _ = build_retriever("hybrid", chunks, "fake-embedder")
+    assert default.candidates == params["candidates"] == 30
+    wider, params, _ = build_retriever("hybrid", chunks, "fake-embedder", min_candidates=50)
+    assert wider.candidates == params["candidates"] == 50
+    narrower, params, _ = build_retriever("hybrid", chunks, "fake-embedder", min_candidates=10)
+    assert narrower.candidates == params["candidates"] == 30  # 기본값 아래로는 줄이지 않는다
+
+
+# --- 근거 기준 거절 지표 (Task 20 후속): 검색 실패와 생성 실패를 가른다 ---
+# fake_retriever: q1은 근거가 상위 k에 있고, q2는 없고(검색 실패), q3는 범위 밖이다
+
+
+def grounded_fields(report: EvalReport) -> list[tuple[bool, bool]]:
+    return [(r["evidence_in_context"], r["grounded_refusal_correct"]) for r in report.items]
+
+
+def test_grounded_metric_when_everything_is_answered(fake_retriever):
+    report = run_eval(
+        items_with_one_oos,
+        fake_retriever,
+        k=5,
+        llm=FakeLLM("답입니다 [1]."),
+        workspace=ws,
+        role="준법감시",
+    )
+    # q1만 맞다. q2(검색 실패)와 q3(범위 밖)는 근거 없이 답했다
+    assert grounded_fields(report) == [(True, True), (False, False), (False, False)]
+    assert report.grounded_refusal_accuracy == pytest.approx(1 / 3)
+    assert (report.over_refusals, report.grounded_refusals, report.ungrounded_answers) == (0, 0, 2)
+    # 기존 지표는 q2를 "답해서 정답"으로 센다
+    assert report.refusal_accuracy == pytest.approx(2 / 3)
+
+
+def test_grounded_metric_when_everything_is_refused(fake_retriever):
+    report = run_eval(
+        items_with_one_oos,
+        fake_retriever,
+        k=5,
+        llm=FakeLLM(REFUSAL_TEXT),
+        workspace=ws,
+        role="준법감시",
+    )
+    # q1은 근거가 있는데 거절(과잉 거절). q2는 근거가 없어서 거절했으니 정답이다
+    assert grounded_fields(report) == [(True, False), (False, True), (False, True)]
+    assert report.grounded_refusal_accuracy == pytest.approx(2 / 3)
+    assert (report.over_refusals, report.grounded_refusals, report.ungrounded_answers) == (1, 2, 0)
+    assert report.refusal_accuracy == pytest.approx(1 / 3)  # 기존 지표는 q2의 거절을 오답으로 센다
+    assert report.by_qtype["table"]["grounded_refusals"] == 1
+    assert (
+        "근거가 있는데 거절 1 · 근거가 없어서 거절 2 · 근거가 없는데 답함 0 "
+        "(근거 = 상위 5개에 라벨된 근거가 하나라도 있음)"
+    ) in format_markdown(report).splitlines()
+
+
+def test_partial_evidence_counts_as_evidence_in_context(fake_retriever):
+    # 근거 두 개 중 하나(제2조)만 상위 k에 들어왔다: recall 0.5여도 "근거 있음"으로 본다
+    two = GoldItem(
+        id="bank-040",
+        question="q1",
+        answer="a",
+        evidence=[
+            Evidence(doc_id="banking-act", article="제2조"),
+            Evidence(doc_id="prod-fixed-deposit"),
+        ],
+        qtype="multi_doc",
+    )
+    answered = run_eval([two], fake_retriever, 5, FakeLLM("답 [1]."), ws, "준법감시")
+    assert answered.items[0]["recall_at_k"] == 0.5
+    assert grounded_fields(answered) == [(True, True)]
+    refused = run_eval([two], fake_retriever, 5, FakeLLM(REFUSAL_TEXT), ws, "준법감시")
+    assert grounded_fields(refused) == [(True, False)] and refused.over_refusals == 1
+
+
+def test_retrieval_only_report_has_no_grounded_metric(fake_retriever):
+    report = run_eval(
+        items_with_one_oos, fake_retriever, k=5, llm=None, workspace=ws, role="준법감시"
+    )
+    assert report.grounded_refusal_accuracy is None and report.over_refusals is None
+    assert "evidence_in_context" not in report.items[0]
+    assert "over_refusals" not in report.by_qtype["lookup"]
+    assert "근거가 있는데 거절" not in format_markdown(report)
+
+
+def test_role_without_access_refuses_everything_as_grounded_refusals(fake_retriever):
+    # 볼 수 있는 등급이 없으면 검색 결과가 없다: 근거가 없어서 거절한 것이다
+    report = run_eval(
+        items_with_one_oos, fake_retriever, k=5, llm=FakeLLM("x"), workspace=ws, role="견학생"
+    )
+    assert (report.over_refusals, report.grounded_refusals, report.ungrounded_answers) == (0, 3, 0)
+    assert report.grounded_refusal_accuracy == 1.0

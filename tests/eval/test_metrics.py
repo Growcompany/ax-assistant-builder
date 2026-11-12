@@ -5,6 +5,7 @@ import pytest
 from axbuilder.eval.dataset import Evidence
 from axbuilder.eval.metrics import (
     citation_precision,
+    grounded_refusal_correct,
     matches,
     recall_at_k,
     reciprocal_rank,
@@ -156,3 +157,29 @@ def test_citation_precision_with_citations_but_no_evidence_is_zero():
 )
 def test_refusal_correct_table(refused, qtype, expected):
     assert refusal_correct(refused, qtype) is expected
+
+
+# --- grounded_refusal_correct: 근거가 프롬프트에 있었는가로 거절을 채점한다 ---
+
+
+@pytest.mark.parametrize(
+    ("refused", "evidence_in_context", "expected"),
+    [
+        (False, True, True),  # 근거가 있고 답했다
+        (True, True, False),  # 근거가 있는데 거절(과잉 거절)
+        (True, False, True),  # 근거가 없어서 거절(범위 밖, 검색 실패)
+        (False, False, False),  # 근거가 없는데 답했다(환각 위험)
+    ],
+)
+def test_grounded_refusal_correct_table(refused, evidence_in_context, expected):
+    assert grounded_refusal_correct(refused, evidence_in_context) is expected
+
+
+def test_grounded_and_plain_refusal_metrics_differ_only_on_retrieval_misses():
+    # 답해야 하는 문항인데 검색이 근거를 못 가져왔다: 거절하면 기존 지표는 오답, 근거 기준은 정답
+    assert not refusal_correct(True, "lookup") and grounded_refusal_correct(True, False)
+    assert refusal_correct(False, "lookup") and not grounded_refusal_correct(False, False)
+    # 범위 밖(근거 없음)과 근거가 들어온 문항에서는 두 지표가 같다
+    for refused in (True, False):
+        assert refusal_correct(refused, "out_of_scope") == grounded_refusal_correct(refused, False)
+        assert refusal_correct(refused, "lookup") == grounded_refusal_correct(refused, True)

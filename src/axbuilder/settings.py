@@ -5,7 +5,7 @@ import re
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # 필드 이름 → 환경변수 이름. ANTHROPIC_API_KEY 같은 비밀값은 여기 두지 않는다:
 # SDK가 환경변수에서 직접 읽으므로, 설정 객체를 로그에 찍어도 키가 새지 않는다
@@ -19,6 +19,8 @@ ENV_VARS = {
     "allowed_hosts": "AXB_ALLOWED_HOSTS",
     "cors_origins": "AXB_CORS_ORIGINS",
     "api_docs": "AXB_API_DOCS",
+    "reranker": "AXB_RERANKER",
+    "rerank_candidates": "AXB_RERANK_CANDIDATES",
 }
 
 DEFAULT_ALLOWED_HOSTS = ("127.0.0.1", "localhost", "[::1]")
@@ -49,6 +51,11 @@ class Settings(BaseModel):
     # /docs(Swagger)·/redoc을 켠다. 기본은 끔: 그 화면은 외부 CDN의 스크립트를 불러오고, 그
     # 안의 버튼으로 관리 API가 실행된다. 개발할 때만 켠다(true/false)
     api_docs: bool = False
+    # 검색 결과를 크로스 인코더로 다시 줄 세운다(axbuilder.retrieval.rerank의 RERANKER_MODELS).
+    # 기본은 끔: 모델을 더 받아야 하고 질문마다 시간이 더 든다. 색인과는 무관하다
+    reranker: Literal["none", "kure-nano", "bge-v2-m3"] = "none"
+    # 리랭커에 넘기는 후보 수. 리랭커가 꺼져 있으면 쓰지 않는다
+    rerank_candidates: int = Field(default=30, ge=1, le=200)
 
     @field_validator("cors_origins", mode="before")
     @classmethod

@@ -4,6 +4,7 @@ import pytest
 
 from axbuilder.generation.answer import REFUSAL_TEXT, answer, build_prompt
 from axbuilder.generation.llm import FakeLLM, LLMResponse, LLMUnavailableError
+from axbuilder.generation.refusal import RefusalKind
 from axbuilder.models import Answer, Chunk, Citation, ScoredChunk
 from axbuilder.workspace import Workspace
 
@@ -314,6 +315,52 @@ def test_refusal_first_then_cited_partial_answer_is_refusal(retriever):
     a = answer("q", retriever, FakeLLM(reply), ws, "상담원")
     assert a.refused is True and a.citations == [] and a.text == REFUSAL_TEXT
     assert a.llm is not None and a.llm.text == reply
+
+
+# --- 거절의 종류 (M-2 Task 20) ---
+
+
+def test_paraphrased_refusal_is_normalized_and_keeps_raw_text(retriever):
+    # 기준선 bank-046의 실제 출력: 문구를 바꿔 거절하면서 무관한 인용 2개를 달았다
+    reply = (
+        "제공된 자료로는 옆 은행 파킹통장의 금리가 얼마인지 확인할 수 없습니다. "
+        "[1] 및 [2] 는 AXB은행의 정기예금 상품에 대해만 서술되어 있으며, "
+        "다른 은행 관련 정보는 포함되어 있지 않습니다."
+    )
+    a = answer("q", retriever, FakeLLM(reply), ws, "상담원")
+    assert a.refused is True and a.refusal_kind is RefusalKind.PARAPHRASE
+    assert a.text == REFUSAL_TEXT and a.citations == []
+    assert a.llm is not None and a.llm.text == reply  # 모델이 쓴 문장은 그대로 남는다
+    assert len(a.retrieved) == 2
+
+
+def test_exact_refusal_kind(retriever, empty_retriever):
+    a = answer("q", retriever, FakeLLM(f"{REFUSAL_TEXT} 자료에 없습니다."), ws, "상담원")
+    assert a.refused is True and a.refusal_kind is RefusalKind.EXACT
+    # 검색 결과가 없어 LLM을 부르지 않은 거절도 정해진 문구이므로 EXACT
+    b = answer("q", empty_retriever, FakeLLM("x"), ws, "상담원")
+    assert b.refused is True and b.refusal_kind is RefusalKind.EXACT and b.llm is None
+
+
+@pytest.mark.parametrize(
+    "reply",
+    [
+        "한도는 1억원입니다 [1].",
+        "만기 전에는 중도해지할 수 없습니다 [1].",  # "…할 수 없습니다"가 정답
+        "퇴직연금 한도는 자료에 없지만 일반 예금은 1억원까지 보호됩니다 [1].",  # 부분 답변
+        "제공된 자료로는 퇴직연금 한도를 확인할 수 없습니다. 일반 예금은 1억원입니다 [1].",
+    ],
+)
+def test_answers_keep_text_citations_and_kind_none(retriever, reply):
+    a = answer("q", retriever, FakeLLM(reply), ws, "상담원")
+    assert a.refused is False and a.refusal_kind is RefusalKind.NONE
+    assert a.text == reply and cited_ids(a) == [c1.chunk_id]
+
+
+def test_refused_matches_refusal_kind_default():
+    # refusal_kind를 주지 않고 만든 Answer(기존 호출 코드)는 NONE이다
+    a = Answer(text="답", citations=[], refused=False, retrieved=[], llm=None)
+    assert a.refusal_kind is RefusalKind.NONE
 
 
 # --- 권한(역할) ---

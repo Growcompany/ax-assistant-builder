@@ -2,7 +2,10 @@
 
 사용:
     python -m axbuilder.eval.run --workspace bank --retriever {bm25,dense,hybrid} --k 5 [--with-llm]
+        [--reranker {none,kure-nano,bge-v2-m3}] [--candidates 30]
 결과는 reports/{workspace}/{YYYYmmdd-HHMM}-{retriever}.json에 저장하고 마크다운 표로 출력한다.
+--reranker를 주면 검색기의 앞 --candidates개를 리랭커로 다시 줄 세운 뒤 k개를 쓰고, 파일 이름은
+{retriever}+{reranker}-c{candidates}가 된다.
 원문은 미리 받아 두어야 한다(python scripts/download_corpus.py bank). --with-llm은 AXB_LLM_MODE를
 따른다(기본 local = Ollama). cloud면 문항마다 유료 Claude API를 부르므로 --allow-cloud를 함께
 줘야 한다. 색인은 메모리에만 만든다.
@@ -26,6 +29,7 @@ from axbuilder.corpus import CorpusSource, load_sources, source_file
 from axbuilder.eval.dataset import Evidence, GoldItem, QType, load_golden, validate_golden
 from axbuilder.eval.metrics import (
     citation_precision,
+    grounded_refusal_correct,
     matches,
     recall_at_k,
     reciprocal_rank,
@@ -33,16 +37,26 @@ from axbuilder.eval.metrics import (
 )
 from axbuilder.generation.answer import answer
 from axbuilder.generation.llm import LLMClient, LLMUnavailableError, get_llm
+from axbuilder.generation.refusal import RefusalKind
 from axbuilder.ingest.chunking import chunk_document
 from axbuilder.ingest.loaders import load_document
 from axbuilder.models import Answer, Chunk, ScoredChunk
 from axbuilder.retrieval.bm25 import BM25Index
 from axbuilder.retrieval.hybrid import RRF_K, HybridRetriever, Retriever
+from axbuilder.retrieval.rerank import (
+    RERANKER_MODELS,
+    CrossEncoderReranker,
+    Reranker,
+    RerankerUnavailableError,
+    RerankRetriever,
+)
 from axbuilder.settings import Settings
 from axbuilder.workspace import Workspace, WorkspaceNotFoundError, WorkspaceStore
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 RETRIEVERS = ("bm25", "dense", "hybrid")
+RERANKERS = ("none", *RERANKER_MODELS)
+DEFAULT_RERANK_CANDIDATES = 30  # 리랭커에 넘기는 후보 수
 # 골든셋에 내부 지침 근거가 있으므로 기본 역할은 public·internal을 모두 보는 역할이다
 DEFAULT_ROLE = "준법감시"
 # workspace.yaml이 아직 없을 때(Task 10 API 전) 쓰는 가상 은행 설정 (scripts/demo_answer.py와 같음)
@@ -62,6 +76,13 @@ class EvalReport(BaseModel):
     mrr: float
     citation_precision: float | None  # 인용이 하나라도 있는 문항의 평균. LLM 없이는 None
     refusal_accuracy: float | None  # LLM 없이는 None
+    # 정해진 문구(EXACT)만 거절로 센 값 = v0.2.0까지의 규칙. 예전 보고서에는 없어 기본값을 둔다
+    refusal_accuracy_strict: float | None = None
+    # 근거가 상위 k에 있으면 답변, 없으면 거절이 정답인 지표와 그 내역 (grounded_refusal_correct)
+    grounded_refusal_accuracy: float | None = None
+    over_refusals: int | None = None  # 근거가 있는데 거절
+    grounded_refusals: int | None = None  # 근거가 없어서 거절 (범위 밖 포함)
+    ungrounded_answers: int | None = None  # 근거가 없는데 답함 (환각 위험 신호)
     by_qtype: dict[str, dict[str, float]]  # qtype → {"n", 지표...} (잴 수 없는 지표는 빠짐)
     items: list[dict]  # 문항별 기록: 검색 결과·적중 여부·답변·지연 (실패 사례 분석용)
     # 계획의 Interfaces에 없는 필드: 색인·평가 시간과 질문당 지연(초·밀리초). 결과라 config와 나눈다
@@ -133,6 +154,11 @@ def run_eval(
         mrr=overall["mrr"],
         citation_precision=overall.get("citation_precision"),
         refusal_accuracy=overall.get("refusal_accuracy"),
+        refusal_accuracy_strict=overall.get("refusal_accuracy_strict"),
+        grounded_refusal_accuracy=overall.get("grounded_refusal_accuracy"),
+        over_refusals=overall.get("over_refusals"),
+        grounded_refusals=overall.get("grounded_refusals"),
+        ungrounded_answers=overall.get("ungrounded_answers"),
         by_qtype=by_qtype,
         items=records,
         timing={
@@ -181,6 +207,8 @@ def _record(
         "latency_ms": latency_ms,
     }
     if result is not None:
+        # 근거가 둘인 문항에서 하나만 들어와도 "있음". 범위 밖 문항은 근거가 없어 늘 False
+        evidence_in_context = bool(record["recall_at_k"])
         record.update(
             {
                 "refused": result.refused,
@@ -189,6 +217,16 @@ def _record(
                 "citation_precision": citation_precision(result.citations, item.evidence),
                 "answer": result.text,
                 "llm": None if result.llm is None else result.llm.model_dump(),
+                "refusal_kind": result.refusal_kind.value,
+                "refusal_correct_strict": refusal_correct(
+                    result.refusal_kind is RefusalKind.EXACT, item.qtype
+                ),
+                # 정규화 전 모델 출력. 바꿔 말한 거절도 answer는 정해진 문구라 원문은 여기서 본다
+                "raw_answer": None if result.llm is None else result.llm.text,
+                "evidence_in_context": evidence_in_context,
+                "grounded_refusal_correct": grounded_refusal_correct(
+                    result.refused, evidence_in_context
+                ),
             }
         )
     return record
@@ -200,6 +238,14 @@ _SUMMARY_KEYS = {
     "mrr": "reciprocal_rank",
     "citation_precision": "citation_precision",
     "refusal_accuracy": "refusal_correct",
+    "refusal_accuracy_strict": "refusal_correct_strict",
+    "grounded_refusal_accuracy": "grounded_refusal_correct",
+}
+# 근거 기준 거절 지표의 내역: 이름 → (근거가 상위 k에 있는가, 거절했는가)
+_REFUSAL_COUNTS = {
+    "over_refusals": (True, True),
+    "grounded_refusals": (False, True),
+    "ungrounded_answers": (False, False),
 }
 
 
@@ -214,6 +260,10 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, float]:
         values = [float(r[key]) for r in records if r.get(key) is not None]
         if values:
             summary[name] = math.fsum(values) / len(values)
+    answered = [r for r in records if r.get("evidence_in_context") is not None]
+    if answered:
+        for name, case in _REFUSAL_COUNTS.items():
+            summary[name] = sum((r["evidence_in_context"], r["refused"]) == case for r in answered)
     return summary
 
 
@@ -261,6 +311,8 @@ def format_markdown(report: EvalReport) -> str:
             ("인용 n", "citation_precision", True),
             ("인용 정밀도", "citation_precision", False),
             ("거절 정확도", "refusal_accuracy", False),
+            ("거절 정확도(문구 일치만)", "refusal_accuracy_strict", False),
+            ("근거 기준 거절 정확도", "grounded_refusal_accuracy", False),
         ]
     columns = ["구분", "n", *(column for column, _, _ in layout)]
 
@@ -292,17 +344,34 @@ def format_markdown(report: EvalReport) -> str:
         rows.append(row("문서 단위 근거 포함", summarize(doc_level), doc_level))
 
     levels = ", ".join(config.get("access_levels", []))
+    retriever = config.get("retriever", "?")
+    if config.get("reranker"):
+        retriever += f" + {config['reranker']} (candidates={config.get('candidates')})"
     lines = [
-        f"### {config.get('workspace')} · {config.get('retriever', '?')} · k={k} · "
+        f"### {config.get('workspace')} · {retriever} · k={k} · "
         f"role={config.get('role')} ({levels})",
         "",
         "| " + " | ".join(columns) + " |",
         "|" + "|".join("---" for _ in columns) + "|",
         *rows,
     ]
+    if report.over_refusals is not None:
+        lines += [
+            "",
+            f"근거가 있는데 거절 {report.over_refusals} · 근거가 없어서 거절 "
+            f"{report.grounded_refusals} · 근거가 없는데 답함 {report.ungrounded_answers} "
+            f"(근거 = 상위 {k}개에 라벨된 근거가 하나라도 있음)",
+        ]
     details = [
         f"{key}={config[key]}"
-        for key in ("n_chunks", "embed_model", "llm_model", "commit")
+        for key in (
+            "n_chunks",
+            "embed_model",
+            "llm_model",
+            "rerank_truncated",
+            "rerank_pairs",
+            "commit",
+        )
         if config.get(key) is not None
     ]
     if details:
@@ -383,10 +452,19 @@ def _load_workspace(store: WorkspaceStore, workspace_id: str) -> Workspace:
         return BANK_WORKSPACE
 
 
+def make_reranker(key: str) -> Reranker:
+    """--reranker 선택지로 리랭커를 만든다. 모델은 첫 score() 때 불러온다."""
+    return CrossEncoderReranker(RERANKER_MODELS[key])
+
+
 def build_retriever(
-    kind: str, chunks: list[Chunk], embed_model: str
+    kind: str, chunks: list[Chunk], embed_model: str, min_candidates: int = 0
 ) -> tuple[Retriever, dict[str, Any], dict[str, float]]:
-    """(검색기, 검색기 설정, {"model_load_seconds", "index_seconds"})."""
+    """(검색기, 검색기 설정, {"model_load_seconds", "index_seconds"}).
+
+    min_candidates는 hybrid가 BM25·dense에서 각각 받는 후보 수의 하한이다(기본값보다 클 때만
+    쓰인다). 리랭커에 넘길 후보 수를 주면 hybrid가 그만큼을 합쳐서 돌려줄 수 있다.
+    """
     timing = {"model_load_seconds": 0.0, "index_seconds": 0.0}
     bm25 = BM25Index()
     params: dict[str, Any] = {}
@@ -411,8 +489,20 @@ def build_retriever(
     if kind == "dense":
         return dense, params, timing
     hybrid = HybridRetriever(bm25, dense)
+    # search(k)는 이미 max(candidates, k)개씩 받으므로 결과는 같다. 실제로 쓰인 값이 보고서의
+    # retriever_params.candidates에 남도록 여기서 맞춘다
+    hybrid.candidates = max(hybrid.candidates, min_candidates)
     params.update({"rrf_k": RRF_K, "candidates": hybrid.candidates})
     return hybrid, params, timing
+
+
+def _rerank_counts(reranker: Reranker | None) -> tuple[int | None, int | None]:
+    """(잘린 쌍 수, 채점한 쌍 수)의 누적값. 세지 않는 리랭커면 None."""
+    return getattr(reranker, "truncated", None), getattr(reranker, "scored", None)
+
+
+def _delta(before: int | None, after: int | None) -> int | None:
+    return None if before is None or after is None else after - before
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -428,11 +518,30 @@ def main(argv: list[str] | None = None) -> int:
         help="AXB_LLM_MODE=cloud에서 --with-llm으로 유료 Claude API 호출을 허락",
     )
     parser.add_argument("--role", default=DEFAULT_ROLE)
+    parser.add_argument(
+        "--reranker",
+        choices=RERANKERS,
+        default="none",
+        help="검색기의 후보를 다시 줄 세울 크로스 인코더 (기본 none)",
+    )
+    parser.add_argument(
+        "--candidates",
+        type=int,
+        default=None,
+        help=f"리랭커에 넘기는 후보 수 (기본 {DEFAULT_RERANK_CANDIDATES}, --reranker와 함께만)",
+    )
     parser.add_argument("--corpus-dir", type=Path, default=REPO_ROOT / "corpus")
     parser.add_argument("--reports-dir", type=Path, default=Path("reports"))
     args = parser.parse_args(argv)
     if args.k < 1:
         parser.error("--k must be >= 1")
+    use_reranker = args.reranker != "none"
+    if args.candidates is not None and not use_reranker:
+        # 리랭커 없이 받아 두면 hybrid 내부 후보 수를 바꾸는 옵션으로 오해하기 쉽다
+        parser.error("--candidates needs --reranker (it is the number of passages reranked)")
+    candidates = DEFAULT_RERANK_CANDIDATES if args.candidates is None else args.candidates
+    if candidates < 1:
+        parser.error("--candidates must be >= 1")
 
     started_at = datetime.now()
     started = time.perf_counter()
@@ -477,8 +586,27 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     load_seconds = time.perf_counter() - t0
 
-    retriever, params, build_timing = build_retriever(args.retriever, chunks, settings.embed_model)
-    # 첫 질문의 지연에 CUDA 초기화·Ollama 모델 적재 시간이 섞이지 않게 한 번 미리 부른다
+    reranker: Reranker | None = None
+    rerank_load_seconds = 0.0
+    if use_reranker:
+        # 색인(임베딩)보다 먼저 불러와, 모델이 없으면 기다리지 않고 바로 알린다
+        reranker = make_reranker(args.reranker)
+        t0 = time.perf_counter()
+        try:
+            reranker.score("예금", ["예금자 보호 한도는 1억원이다"])
+        except RerankerUnavailableError as e:
+            print(f"reranker unavailable: {e}", file=sys.stderr)
+            return 1
+        rerank_load_seconds = time.perf_counter() - t0
+
+    retriever, params, build_timing = build_retriever(
+        args.retriever, chunks, settings.embed_model, candidates if use_reranker else 0
+    )
+    if reranker is not None:
+        build_timing["model_load_seconds"] += rerank_load_seconds
+        retriever = RerankRetriever(retriever, reranker, candidates)
+    # 첫 질문의 지연에 CUDA 초기화·Ollama 모델 적재 시간이 섞이지 않게 한 번 미리 부른다.
+    # 리랭커가 있으면 후보 수만큼의 배치도 여기서 한 번 돈다
     t0 = time.perf_counter()
     retriever.search("예금", k=1)
     llm = get_llm(settings) if args.with_llm else None
@@ -486,6 +614,8 @@ def main(argv: list[str] | None = None) -> int:
         if llm is not None:
             llm.generate("짧게 답하세요.", "안녕하세요", max_tokens=8)
         warmup_seconds = time.perf_counter() - t0
+        # 잘린 입력 수는 평가 문항에서 생긴 것만 센다(위의 적재·예열 호출 제외)
+        before = _rerank_counts(reranker)
         report = run_eval(items, retriever, args.k, llm, workspace, args.role)
     except LLMUnavailableError as e:
         print(f"LLM unavailable: {e}", file=sys.stderr)
@@ -507,6 +637,19 @@ def main(argv: list[str] | None = None) -> int:
             "started_at": started_at.isoformat(timespec="seconds"),
         }
     )
+    label = args.retriever
+    if reranker is not None:
+        # 리랭커가 없을 때는 넣지 않는다: --reranker none의 보고서는 이전과 같아야 한다
+        after = _rerank_counts(reranker)
+        report.config.update(
+            {
+                "reranker": reranker.name,
+                "candidates": candidates,
+                "rerank_truncated": _delta(before[0], after[0]),
+                "rerank_pairs": _delta(before[1], after[1]),
+            }
+        )
+        label = f"{args.retriever}+{args.reranker}-c{candidates}"
     # 읽는 순서대로: 준비(읽기·모델·색인·예열) → 평가 → 전체
     report.timing = {
         "load_seconds": load_seconds,
@@ -515,7 +658,7 @@ def main(argv: list[str] | None = None) -> int:
         **report.timing,
         "total_seconds": time.perf_counter() - started,
     }
-    path = save_report(report, args.reports_dir / workspace.id, args.retriever, started_at)
+    path = save_report(report, args.reports_dir / workspace.id, label, started_at)
     print(format_markdown(report))
     print(f"\nsaved: {path}")
     return 0
