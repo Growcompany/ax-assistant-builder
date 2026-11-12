@@ -33,8 +33,13 @@ REWRITTEN_ARTICLE_BEFORE = re.compile(
 )
 
 # 긴 조항을 나눌 때 조각에 붙이는 조항 머리: "제11조(대리인 거래)", "제5조 (특례)", 제목이 없으면
-# "제7조". 제목 괄호가 80자를 넘으면(머리가 아닐 수 있다) 조 번호만 쓴다
-ARTICLE_HEAD = re.compile(r"제\d+조(?:의\d+)?(?:[ \t]*[(（][^()（）\n]{1,80}[)）])?")
+# "제7조". 제목 괄호가 80자를 넘거나 앞 공백이 3칸을 넘으면(머리가 아닐 수 있다) 조 번호만 쓴다.
+# 길이에 상한을 두어 머리는 최대 95자다(MIN_MAX_CHARS의 절반 아래). 조 번호가 이보다 긴 조항은
+# 머리 없이 나눈다
+ARTICLE_HEAD = re.compile(
+    r"제\d{1,4}조(?:의\d{1,3})?(?:[ \t]{0,3}[(（][^()（）\n]{1,80}[)）])?(?![\d의])"
+)
+_NON_SPACE = re.compile(r"\S")  # str.isspace()가 아닌 글자 (strip()과 같은 기준)
 # 조항을 나누는 경계. 앞의 것부터 쓰고, 그래도 긴 덩어리만 다음 경계로 더 나눈다.
 # 항: 줄 맨 앞의 원문자 ①~⑳, ㉑~㉟, ㊱~㊿ (법령 원문에 ㊿까지 있고, 뒤에 공백이 없기도 하다:
 #     "①이 법은")
@@ -131,35 +136,43 @@ def _check_max_chars(max_chars: int | None) -> None:
 def _split_article(piece: Piece, max_chars: int) -> list[Piece]:
     """본문 조항 하나를 max_chars 이하의 조각들로. 조각의 위치·article은 원래 조항 그대로다.
 
-    첫 조각은 원문 그대로(조항 머리로 시작한다), 둘째 조각부터는 "머리\n" + 본문이다. 붙인 머리도
-    max_chars에 센다. 경계로 나눈 덩어리를 차례로 이어 붙이다가 넘치면 새 조각을 시작한다.
+    첫 조각은 머리 + 원문의 구분 문자 하나 + 본문(구분 공백이 한 칸이면 원문 그대로다), 둘째
+    조각부터는 "머리\n" + 본문이다. 붙인 머리도 max_chars에 센다. 경계로 나눈 덩어리를 차례로 이어
+    붙이다가 넘치면 새 조각을 시작한다. 머리를 알아볼 수 없으면 머리 없이 나눈다.
+
+    끝나는 것: 머리는 95자 이하(ARTICLE_HEAD)이고 max_chars >= 200이라 덩어리 한도가 늘 1 이상이다.
+    머리 뒤 공백이 아무리 길어도 한 글자로 세므로 한도를 줄이지 않는다.
     """
     pos, body, article = piece
     if article is None or article.startswith(ADDENDA) or len(body) <= max_chars:
         return [piece]
     found = ARTICLE_HEAD.match(body)
-    head = found.group() if found else article
-    start = len(head) if found else 0
-    prefix = head + "\n"
-    # 덩어리 하나의 상한. 첫 조각 = 머리 + 원문의 구분 공백(" "나 "\n", 여러 칸일 수 있다) + 덩어리,
-    # 다음 조각 = 머리 + "\n" + 덩어리. 어느 쪽도 max_chars를 넘지 않게 큰 쪽 공백으로 뺀다
-    gap = max(1, _leading_space(body[start:]))
-    units = _units(body, start, len(body), max_chars - len(head) - gap, 0)
+    head = found.group() if found else ""
+    start = len(head)
+    gap = body[start : start + _leading_space(body[start:])]
+    # 원문의 머리 뒤 공백이 여러 칸(줄바꿈 900개 등)이어도 첫 조각에는 한 글자만 둔다
+    sep = "\n" if "\n" in gap else gap[:1]
+    prefix = head + "\n" if head else ""
+    budget = max_chars - len(prefix)  # 덩어리 하나(앞뒤 공백을 뺀 길이)의 상한
+    units = _units(body, start, len(body), budget, 0)
 
-    def fits(begin: int, end: int) -> bool:
-        return len(body[begin:end].strip()) + (len(prefix) if begin else 0) <= max_chars
-
+    # 조각의 길이 = 붙는 머리 + (조각 첫 글자부터 마지막 글자까지). 덩어리마다 한 번씩만 훑는다
     groups: list[tuple[int, int]] = []
-    begin, end = 0, units[0][1]  # 첫 조각은 머리부터. 첫 덩어리가 늘 함께 들어간다
+    begin, end = units[0]
+    first = begin + _leading_space(body[begin:end])  # 이 조각의 첫 글자 위치
     for unit_start, unit_end in units[1:]:
-        if fits(begin, unit_end):
+        last = unit_start + len(body[unit_start:unit_end].rstrip())  # 이 덩어리의 끝 글자 다음
+        added = len(head) + len(sep) if not groups else len(prefix)
+        if last == unit_start or last - first + added <= max_chars:  # 공백뿐인 덩어리는 늘 붙는다
             end = unit_end
         else:
             groups.append((begin, end))
             begin, end = unit_start, unit_end
+            first = begin + _leading_space(body[begin:end])
     groups.append((begin, end))
-    return [
-        (pos, prefix + body[b:e].strip() if b else body[b:e].strip(), article) for b, e in groups
+    first_text = head + sep + body[groups[0][0] : groups[0][1]].strip()
+    return [(pos, first_text, article)] + [
+        (pos, prefix + body[b:e].strip(), article) for b, e in groups[1:]
     ]
 
 
@@ -188,11 +201,19 @@ def _units(text: str, lo: int, hi: int, budget: int, level: int) -> list[tuple[i
 
 
 def _cut(text: str, lo: int, hi: int, budget: int) -> list[tuple[int, int]]:
-    """경계가 없는 긴 구간을 budget 글자 이하로 자른다. 뒤쪽 절반에 공백이 있으면 그 자리에서."""
+    """경계가 없는 긴 구간을 budget 글자 이하로 자른다. 뒤쪽 절반에 공백이 있으면 그 자리에서.
+
+    한 번 돌 때마다 적어도 한 글자 앞으로 간다(cut > begin >= start). 구간을 한 번만 훑는다.
+    """
+    if budget < 1:
+        raise ValueError(f"budget must be positive, got {budget}")
+    content_end = lo + len(text[lo:hi].rstrip())  # 마지막 글자 다음
     spans: list[tuple[int, int]] = []
     start = lo
-    while len(text[start:hi].strip()) > budget:
-        begin = start + _leading_space(text[start:hi])
+    while (found := _NON_SPACE.search(text, start, content_end)) and (
+        content_end - found.start() > budget
+    ):
+        begin = found.start()
         end = begin + budget  # text[begin:end]가 budget 글자다. text[end]가 공백이면 낱말 경계
         cut = next((i + 1 for i in range(end, begin + budget // 2, -1) if text[i].isspace()), end)
         spans.append((start, cut))
