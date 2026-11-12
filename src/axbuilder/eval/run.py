@@ -2,10 +2,12 @@
 
 사용:
     python -m axbuilder.eval.run --workspace bank --retriever {bm25,dense,hybrid} --k 5 [--with-llm]
-        [--reranker {none,kure-nano,bge-v2-m3}] [--candidates 30]
+        [--reranker {none,kure-nano,bge-v2-m3}] [--candidates 30] [--max-chunk-chars N]
 결과는 reports/{workspace}/{YYYYmmdd-HHMM}-{retriever}.json에 저장하고 마크다운 표로 출력한다.
 --reranker를 주면 검색기의 앞 --candidates개를 리랭커로 다시 줄 세운 뒤 k개를 쓰고, 파일 이름은
 {retriever}+{reranker}-c{candidates}가 된다.
+--max-chunk-chars를 주면 N자보다 긴 본문 조항을 나눠 색인하고(chunk_document의 max_chars), 파일
+이름 끝에 -m{N}을, config에 chunking을 남긴다. 서버 설정 AXB_MAX_CHUNK_CHARS는 보지 않는다.
 원문은 미리 받아 두어야 한다(python scripts/download_corpus.py bank). --with-llm은 AXB_LLM_MODE를
 따른다(기본 local = Ollama). cloud면 문항마다 유료 Claude API를 부르므로 --allow-cloud를 함께
 줘야 한다. 색인은 메모리에만 만든다.
@@ -26,19 +28,21 @@ from typing import Any, get_args
 from pydantic import BaseModel, Field
 
 from axbuilder.corpus import CorpusSource, load_sources, source_file
-from axbuilder.eval.dataset import Evidence, GoldItem, QType, load_golden, validate_golden
+from axbuilder.eval.dataset import TAGS, Evidence, GoldItem, QType, load_golden, validate_golden
 from axbuilder.eval.metrics import (
     citation_precision,
     grounded_refusal_correct,
     matches,
     recall_at_k,
+    recall_at_k_strict,
     reciprocal_rank,
+    reciprocal_rank_strict,
     refusal_correct,
 )
 from axbuilder.generation.answer import answer
 from axbuilder.generation.llm import LLMClient, LLMUnavailableError, get_llm
 from axbuilder.generation.refusal import RefusalKind
-from axbuilder.ingest.chunking import chunk_document
+from axbuilder.ingest.chunking import MIN_MAX_CHARS, chunk_document
 from axbuilder.ingest.loaders import load_document
 from axbuilder.models import Answer, Chunk, ScoredChunk
 from axbuilder.retrieval.bm25 import BM25Index
@@ -50,7 +54,7 @@ from axbuilder.retrieval.rerank import (
     RerankerUnavailableError,
     RerankRetriever,
 )
-from axbuilder.settings import Settings
+from axbuilder.settings import MAX_CHUNK_CHARS_LIMIT, Settings
 from axbuilder.workspace import Workspace, WorkspaceNotFoundError, WorkspaceStore
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -74,6 +78,9 @@ class EvalReport(BaseModel):
     n: int  # 채점한 문항 수 (검색 지표만이면 out_of_scope 제외)
     recall_at_k: float  # 근거가 있는 문항의 평균
     mrr: float
+    # 답 문구(anchor) 기준 Recall·MRR(Task 24). 골든셋에 anchor가 하나도 없으면 None
+    recall_at_k_strict: float | None = None
+    mrr_strict: float | None = None
     citation_precision: float | None  # 인용이 하나라도 있는 문항의 평균. LLM 없이는 None
     refusal_accuracy: float | None  # LLM 없이는 None
     # 정해진 문구(EXACT)만 거절로 센 값 = v0.2.0까지의 규칙. 예전 보고서에는 없어 기본값을 둔다
@@ -84,6 +91,8 @@ class EvalReport(BaseModel):
     grounded_refusals: int | None = None  # 근거가 없어서 거절 (범위 밖 포함)
     ungrounded_answers: int | None = None  # 근거가 없는데 답함 (환각 위험 신호)
     by_qtype: dict[str, dict[str, float]]  # qtype → {"n", 지표...} (잴 수 없는 지표는 빠짐)
+    # 태그 → by_qtype과 같은 요약(Task 24). 태그가 있는 문항만, 예전 보고서에는 없어 기본값을 둔다
+    by_tag: dict[str, dict[str, float]] = Field(default_factory=dict)
     items: list[dict]  # 문항별 기록: 검색 결과·적중 여부·답변·지연 (실패 사례 분석용)
     # 계획의 Interfaces에 없는 필드: 색인·평가 시간과 질문당 지연(초·밀리초). 결과라 config와 나눈다
     timing: dict[str, float] = Field(default_factory=dict)
@@ -106,6 +115,8 @@ def run_eval(
     if not any(item.evidence for item in scored):
         raise ValueError("no golden items with evidence to score")
 
+    # 답 문구가 있는 근거가 하나라도 있을 때만 엄격 지표를 단다(없으면 보고서가 이전과 같다)
+    strict = any(ev.anchor for item in scored for ev in item.evidence)
     records = []
     started = time.perf_counter()
     for item in scored:
@@ -129,7 +140,7 @@ def run_eval(
                 ) from e
             retrieved = result.retrieved
         latency_ms = (time.perf_counter() - t0) * 1000
-        records.append(_record(item, retrieved, k, result, latency_ms))
+        records.append(_record(item, retrieved, k, result, latency_ms, strict))
     eval_seconds = time.perf_counter() - started
 
     overall = summarize(records)
@@ -138,6 +149,11 @@ def run_eval(
         qtype: summarize([r for r in records if r["qtype"] == qtype])
         for qtype in QTYPE_ORDER
         if qtype in present
+    }
+    by_tag = {
+        tag: summarize([r for r in records if tag in r["tags"]])
+        for tag in TAGS
+        if any(tag in r["tags"] for r in records)
     }
     latencies = [r["latency_ms"] for r in records]
     return EvalReport(
@@ -152,6 +168,8 @@ def run_eval(
         n=len(records),
         recall_at_k=overall["recall_at_k"],
         mrr=overall["mrr"],
+        recall_at_k_strict=overall.get("recall_at_k_strict"),
+        mrr_strict=overall.get("mrr_strict"),
         citation_precision=overall.get("citation_precision"),
         refusal_accuracy=overall.get("refusal_accuracy"),
         refusal_accuracy_strict=overall.get("refusal_accuracy_strict"),
@@ -160,6 +178,7 @@ def run_eval(
         grounded_refusals=overall.get("grounded_refusals"),
         ungrounded_answers=overall.get("ungrounded_answers"),
         by_qtype=by_qtype,
+        by_tag=by_tag,
         items=records,
         timing={
             "eval_seconds": eval_seconds,
@@ -181,12 +200,14 @@ def _record(
     k: int,
     result: Answer | None,
     latency_ms: float,
+    strict: bool = False,
 ) -> dict[str, Any]:
     chunks = [s.chunk for s in retrieved][: max(k, 0)]
     has_evidence = bool(item.evidence)
     record: dict[str, Any] = {
         "id": item.id,
         "qtype": item.qtype,
+        "tags": list(item.tags),
         "question": item.question,
         "evidence": [_label(ev) for ev in item.evidence],
         # 문서 단위 근거(article·page 없음)는 그 문서의 아무 청크나 맞아 지표가 후해진다
@@ -206,6 +227,13 @@ def _record(
         "reciprocal_rank": reciprocal_rank(chunks, item.evidence) if has_evidence else None,
         "latency_ms": latency_ms,
     }
+    if strict:
+        record["recall_at_k_strict"] = (
+            recall_at_k_strict(chunks, item.evidence, k) if has_evidence else None
+        )
+        record["reciprocal_rank_strict"] = (
+            reciprocal_rank_strict(chunks, item.evidence) if has_evidence else None
+        )
     if result is not None:
         # 근거가 둘인 문항에서 하나만 들어와도 "있음". 범위 밖 문항은 근거가 없어 늘 False
         evidence_in_context = bool(record["recall_at_k"])
@@ -236,6 +264,8 @@ def _record(
 _SUMMARY_KEYS = {
     "recall_at_k": "recall_at_k",
     "mrr": "reciprocal_rank",
+    "recall_at_k_strict": "recall_at_k_strict",
+    "mrr_strict": "reciprocal_rank_strict",
     "citation_precision": "citation_precision",
     "refusal_accuracy": "refusal_correct",
     "refusal_accuracy_strict": "refusal_correct_strict",
@@ -271,11 +301,16 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, float]:
 
 
 def load_corpus_chunks(
-    sources_path: Path, raw_dir: Path, repo_root: Path, workspace_id: str
+    sources_path: Path,
+    raw_dir: Path,
+    repo_root: Path,
+    workspace_id: str,
+    max_chars: int | None = None,
 ) -> list[Chunk]:
     """sources.yaml의 문서를 모두 읽어 청크로 나눈다. 하나라도 없으면 FileNotFoundError.
 
     문서가 빠진 채 평가하면 그 문서를 근거로 한 문항이 오류 없이 0점이 되므로 멈춘다.
+    max_chars는 chunk_document에 넘긴다(긴 조항 나누기, None이면 나누지 않는다).
     """
     sources = load_sources(sources_path)
     paths = {s.doc_id: source_file(s, raw_dir, repo_root) for s in sources}
@@ -289,12 +324,12 @@ def load_corpus_chunks(
     chunks: list[Chunk] = []
     for source in sources:
         doc = load_document(paths[source.doc_id], source.doc_meta(), workspace_id)
-        chunks.extend(chunk_document(doc))
+        chunks.extend(chunk_document(doc, max_chars))
     return chunks
 
 
 def format_markdown(report: EvalReport) -> str:
-    """전체·qtype별·근거 단위별 표. 근거 단위별 행으로 문서 단위 근거의 부풀림을 본다.
+    """전체·qtype별·근거 단위별·태그별 표. 근거 단위별 행으로 문서 단위 근거의 부풀림을 본다.
 
     LLM 표는 지표마다 분모가 달라 "근거 n"(Recall·MRR의 분모)과 "인용 n"(인용 정밀도의
     분모) 열을 함께 보여 준다. 거절 정확도의 분모는 n이다.
@@ -304,6 +339,9 @@ def format_markdown(report: EvalReport) -> str:
     k = config.get("k")
     # (열 이름, 지표 이름, 분모 열인가) — 분모 열은 그 지표 값이 있는 문항 수를 센다
     layout = [(f"Recall@{k}", "recall_at_k", False), ("MRR", "mrr", False)]
+    if report.recall_at_k_strict is not None:
+        layout += [(f"Recall@{k}(답 문구)", "recall_at_k_strict", False)]
+        layout += [("MRR(답 문구)", "mrr_strict", False)]
     if with_llm:
         layout = [
             ("근거 n", "recall_at_k", True),
@@ -342,6 +380,8 @@ def format_markdown(report: EvalReport) -> str:
         rows.append(row("조항 단위 근거만", summarize(article_only), article_only))
     if doc_level:
         rows.append(row("문서 단위 근거 포함", summarize(doc_level), doc_level))
+    for tag, summary in report.by_tag.items():
+        rows.append(row(f"태그 {tag}", summary, [r for r in report.items if tag in r["tags"]]))
 
     levels = ", ".join(config.get("access_levels", []))
     retriever = config.get("retriever", "?")
@@ -530,6 +570,15 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=f"리랭커에 넘기는 후보 수 (기본 {DEFAULT_RERANK_CANDIDATES}, --reranker와 함께만)",
     )
+    parser.add_argument(
+        "--max-chunk-chars",
+        type=int,
+        default=None,
+        help=(
+            "이 글자 수보다 긴 본문 조항을 항·호·목·줄 경계에서 나눈다 "
+            f"({MIN_MAX_CHARS}~{MAX_CHUNK_CHARS_LIMIT})"
+        ),
+    )
     parser.add_argument("--corpus-dir", type=Path, default=REPO_ROOT / "corpus")
     parser.add_argument("--reports-dir", type=Path, default=Path("reports"))
     args = parser.parse_args(argv)
@@ -542,6 +591,11 @@ def main(argv: list[str] | None = None) -> int:
     candidates = DEFAULT_RERANK_CANDIDATES if args.candidates is None else args.candidates
     if candidates < 1:
         parser.error("--candidates must be >= 1")
+    if args.max_chunk_chars is not None and not (
+        MIN_MAX_CHARS <= args.max_chunk_chars <= MAX_CHUNK_CHARS_LIMIT
+    ):
+        # 서버 설정(AXB_MAX_CHUNK_CHARS)과 같은 범위
+        parser.error(f"--max-chunk-chars must be {MIN_MAX_CHARS}..{MAX_CHUNK_CHARS_LIMIT}")
 
     started_at = datetime.now()
     started = time.perf_counter()
@@ -580,7 +634,9 @@ def main(argv: list[str] | None = None) -> int:
 
     t0 = time.perf_counter()
     try:
-        chunks = load_corpus_chunks(corpus_dir / "sources.yaml", raw_dir, repo_root, workspace.id)
+        chunks = load_corpus_chunks(
+            corpus_dir / "sources.yaml", raw_dir, repo_root, workspace.id, args.max_chunk_chars
+        )
     except FileNotFoundError as e:
         print(e, file=sys.stderr)
         return 1
@@ -650,6 +706,10 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
         label = f"{args.retriever}+{args.reranker}-c{candidates}"
+    if args.max_chunk_chars is not None:
+        # 리랭커와 같은 규칙: 옵션이 없으면 넣지 않아 보고서·파일 이름이 이전과 같다
+        report.config["chunking"] = {"max_chars": args.max_chunk_chars}
+        label += f"-m{args.max_chunk_chars}"
     # 읽는 순서대로: 준비(읽기·모델·색인·예열) → 평가 → 전체
     report.timing = {
         "load_seconds": load_seconds,

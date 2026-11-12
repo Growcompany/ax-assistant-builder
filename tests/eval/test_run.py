@@ -133,6 +133,132 @@ def test_retrieval_only_records_each_item(fake_retriever):
     json.dumps(report.model_dump(mode="json"), ensure_ascii=False)  # 보고서는 JSON으로 저장된다
 
 
+def tagged_items() -> list[GoldItem]:
+    # q1: 조항 번호 질의, q2: 상품명 질의이면서 부정문 정답, q3: 범위 밖(태그 없음)
+    q1, q2, q3 = items_with_one_oos
+    return [
+        q1.model_copy(update={"tags": ["article_ref"]}),
+        q2.model_copy(update={"tags": ["product_name", "negative_answer"]}),
+        q3,
+    ]
+
+
+def test_by_tag_summarizes_each_tag_present(fake_retriever):
+    report = run_eval(tagged_items(), fake_retriever, k=5, llm=None, workspace=ws, role="준법감시")
+    # 태그 순서는 TAGS 순서. 한 문항이 태그 두 개를 가지면 두 행에 모두 들어간다
+    assert report.by_tag == {
+        "article_ref": {"n": 1, "recall_at_k": 1.0, "mrr": 1.0},
+        "product_name": {"n": 1, "recall_at_k": 0.0, "mrr": 0.0},
+        "negative_answer": {"n": 1, "recall_at_k": 0.0, "mrr": 0.0},
+    }
+    tags = [r["tags"] for r in report.items]
+    assert tags == [["article_ref"], ["product_name", "negative_answer"]]
+
+
+def test_by_tag_with_llm_has_answer_metrics(fake_retriever):
+    report = run_eval(
+        tagged_items(), fake_retriever, k=5, llm=FakeLLM("답 [1]."), workspace=ws, role="준법감시"
+    )
+    assert report.by_tag["negative_answer"]["refusal_accuracy"] == 1.0  # 답해야 하는 문항에 답했다
+    assert report.by_tag["negative_answer"]["citation_precision"] == 0.0
+
+
+def test_untagged_golden_set_has_empty_by_tag(fake_retriever):
+    report = run_eval(
+        items_with_one_oos, fake_retriever, k=5, llm=None, workspace=ws, role="준법감시"
+    )
+    assert report.by_tag == {}
+    assert not any(line.startswith("| 태그 ") for line in format_markdown(report).splitlines())
+
+
+def test_report_without_by_tag_still_loads():
+    # Task 24 전의 보고서에는 by_tag가 없다
+    old = {
+        "config": {},
+        "n": 1,
+        "recall_at_k": 1.0,
+        "mrr": 1.0,
+        "citation_precision": None,
+        "refusal_accuracy": None,
+        "by_qtype": {},
+        "items": [],
+    }
+    loaded = EvalReport.model_validate(old)
+    assert loaded.by_tag == {} and loaded.recall_at_k_strict is None and loaded.mrr_strict is None
+
+
+def test_format_markdown_has_a_row_per_tag_below_the_other_rows(fake_retriever):
+    report = run_eval(tagged_items(), fake_retriever, k=5, llm=None, workspace=ws, role="준법감시")
+    lines = format_markdown(report).splitlines()
+    rows = [line for line in lines if line.startswith("| ")][1:]  # 머리행 제외
+    assert rows[-3:] == [
+        "| 태그 article_ref | 1 | 1.000 | 1.000 |",
+        "| 태그 product_name | 1 | 0.000 | 0.000 |",
+        "| 태그 negative_answer | 1 | 0.000 | 0.000 |",
+    ]
+
+
+def anchored_case() -> tuple[list[GoldItem], QueryRetriever]:
+    # 제2조를 나눈 두 조각: 답 문구는 둘째 조각에만 있다.
+    # q2는 문서 단위 근거라 아무 청크나 맞지만, 가져온 상품설명서 청크에 답 문구가 없다
+    head = chunk("banking-act", 1, article="제2조").model_copy(update={"text": "제2조(정의) 머리"})
+    tail = chunk("banking-act", 2, article="제2조").model_copy(
+        update={"text": "2주" + chr(10) + "이내에 답"}
+    )
+    p1 = chunk("prod-fixed-deposit", 0).model_copy(update={"text": "금리 표"})
+    items = [
+        GoldItem(
+            id="bank-001",
+            question="q1",
+            answer="a1",
+            evidence=[Evidence(doc_id="banking-act", article="제2조", anchor="2주 이내에")],
+            qtype="lookup",
+            tags=["article_ref"],
+        ),
+        GoldItem(
+            id="bank-002",
+            question="q2",
+            answer="a2",
+            evidence=[Evidence(doc_id="prod-fixed-deposit", anchor="최대 3회")],
+            qtype="table",
+        ),
+    ]
+    return items, QueryRetriever({"q1": [head, tail], "q2": [p1, law1]})
+
+
+def test_strict_metrics_use_the_anchor():
+    items, retriever = anchored_case()
+    report = run_eval(items, retriever, k=5, llm=None, workspace=ws, role="준법감시")
+    # 라벨만 보면 둘 다 1위에서 맞지만, 답 문구 기준으로는 q1이 2위, q2는 답 문구 청크가 없다
+    assert report.recall_at_k == 1.0 and report.mrr == 1.0
+    assert report.recall_at_k_strict == 0.5 and report.mrr_strict == 0.25
+    first, second = report.items
+    assert first["recall_at_k_strict"] == 1.0 and first["reciprocal_rank_strict"] == 0.5
+    assert second["recall_at_k_strict"] == 0.0 and second["reciprocal_rank_strict"] == 0.0
+    assert report.by_qtype["lookup"]["recall_at_k_strict"] == 1.0
+    assert report.by_qtype["lookup"]["mrr_strict"] == 0.5
+    assert report.by_tag["article_ref"]["mrr_strict"] == 0.5
+
+
+def test_format_markdown_shows_strict_columns_after_mrr():
+    items, retriever = anchored_case()
+    report = run_eval(items, retriever, k=5, llm=None, workspace=ws, role="준법감시")
+    lines = format_markdown(report).splitlines()
+    assert "| 구분 | n | Recall@5 | MRR | Recall@5(답 문구) | MRR(답 문구) |" in lines
+    assert "| 전체 | 2 | 1.000 | 1.000 | 0.500 | 0.250 |" in lines
+    assert "| table | 1 | 1.000 | 1.000 | 0.000 | 0.000 |" in lines
+
+
+def test_without_anchors_there_are_no_strict_metrics(fake_retriever):
+    # 답 문구가 하나도 없는 골든셋이면 보고서와 표는 이전과 같다
+    report = run_eval(
+        items_with_one_oos, fake_retriever, k=5, llm=None, workspace=ws, role="준법감시"
+    )
+    assert report.recall_at_k_strict is None and report.mrr_strict is None
+    assert all("recall_at_k_strict" not in r for r in report.items)
+    assert "답 문구" not in format_markdown(report)
+
+
 def test_k_cuts_the_ranking(fake_retriever):
     report = run_eval(
         items_with_one_oos, fake_retriever, k=1, llm=None, workspace=ws, role="준법감시"

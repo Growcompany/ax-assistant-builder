@@ -50,6 +50,7 @@ def served(monkeypatch, tmp_path):
         "AXB_LOCAL_MODEL",
         "AXB_RERANKER",
         "AXB_RERANK_CANDIDATES",
+        "AXB_MAX_CHUNK_CHARS",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.chdir(tmp_path)  # 기본 data_dir("data")가 저장소에 생기지 않게
@@ -371,3 +372,33 @@ def test_serve_bad_reranker_settings_do_not_start(served, monkeypatch, capsys, n
     captured = capsys.readouterr()
     assert captured.err.startswith("설정 오류:") and "rerank" in captured.err
     assert "Traceback" not in captured.err and served["run"] == []
+
+
+# ---- 청크 분할 시작 줄 (M-2 Task 25) ----
+
+
+def chunking_lines(out: str) -> list[str]:
+    return [line for line in out.splitlines() if line.startswith("청크 분할")]
+
+
+def test_serve_says_nothing_about_chunking_by_default(served, capsys):
+    assert cli.main(["serve", "--port", str(free_port()), "--no-browser"]) == 0
+    assert chunking_lines(capsys.readouterr().out) == []
+
+
+def test_serve_names_a_non_default_chunking(served, monkeypatch, capsys):
+    monkeypatch.setenv("AXB_MAX_CHUNK_CHARS", "800")
+    assert cli.main(["serve", "--port", str(free_port()), "--no-browser"]) == 0
+    assert chunking_lines(capsys.readouterr().out) == [
+        "청크 분할: 800자보다 긴 본문 조항을 항·호·목·줄 경계에서, 그래도 길면 글자 수로 "
+        "나눕니다(AXB_MAX_CHUNK_CHARS). "
+        "다른 설정으로 만든 색인은 다시 색인해야 질문할 수 있습니다"
+    ]
+
+
+def test_serve_bad_chunking_setting_does_not_start(served, monkeypatch, capsys):
+    monkeypatch.setenv("AXB_MAX_CHUNK_CHARS", "100")
+    assert cli.main(["serve", "--port", str(free_port()), "--no-browser"]) == 2
+    captured = capsys.readouterr()
+    assert captured.err.startswith("설정 오류:") and "max_chunk_chars" in captured.err
+    assert served["run"] == []

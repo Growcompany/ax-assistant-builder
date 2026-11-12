@@ -8,14 +8,15 @@ create_app(settings, llm=None, embedder=None)이 앱을 만든다. 테스트는 
   documents/{doc_id}{확장자}    올린 원본. 이름은 클라이언트가 보낸 파일 이름이 아니라 doc_id
   documents/{doc_id}.json      DocMeta + 확장자·크기·sha256
   index/qdrant/                dense 색인 (Qdrant 로컬 모드 파일)
-  index/index.json             색인 정보(임베더, 차원, 청크 수, 색인에 든 doc_id 목록).
-                               색인을 다 만든 뒤에 쓴다
+  index/index.json             색인 정보(임베더, 차원, 청크 수, 색인에 든 doc_id 목록, 청크 분할
+                               설정 chunking). 색인을 다 만든 뒤에 쓴다
   keys.json                    API 키의 해시(원문 없음). axbuilder.api.keys
 
 색인은 워크스페이스별로 메모리에 캐시한다. 서버를 다시 켜면 그 워크스페이스에 처음 질문할 때
 index/의 Qdrant 색인을 열고, 그 안의 청크로 BM25를 다시 만든다(임베딩은 다시 계산하지 않는다).
-임베더가 바뀌었거나 색인이 덜 만들어졌으면 409로 다시 색인하라고 알린다. 문서를 올린 뒤에는
-POST /index를 다시 불러야 질문에 반영된다.
+임베더가 바뀌었거나 색인이 덜 만들어졌으면 409로 다시 색인하라고 알린다. 청크 분할 설정
+(Settings.max_chunk_chars)이 색인을 만들 때와 달라도 409다: 다른 분할로 만든 청크로 답하지 않는다.
+문서를 올린 뒤에는 POST /index를 다시 불러야 질문에 반영된다.
 
 리랭커(Settings.reranker, 기본 none)를 켜면 질문마다 워크스페이스 검색기를 RerankRetriever로
 감싼다. 리랭커는 서버에 하나이고 처음 질문 때 불러온다. 색인과는 무관하다(다시 색인하지 않는다).
@@ -155,6 +156,9 @@ MAX_CHUNKS_PER_DOCUMENT = 10_000
 MAX_CONCURRENT_PARSES = 2
 COLLECTION = "chunks"
 INDEX_INFO = "index.json"
+# index.json에 chunking이 없으면 그 필드를 넣기 전(M-2 Task 25 전)에 만든 색인이고, 그때는 조항을
+# 나누지 않았다
+UNSPLIT_CHUNKING: dict[str, int | None] = {"max_chars": None}
 STATIC_DIR = Path(__file__).parent / "static"  # 화면 파일 (패키지 데이터)
 # 화면 응답에 붙인다. 인라인 스크립트·스타일과 외부 출처를 막아, 문서 제목이나 답변의 글자가
 # 혹시 마크업으로 들어가도 실행되지 않게 한다
@@ -523,6 +527,9 @@ class _Service:
         else:
             self._embedder_name = type(embedder).__name__
         self._embedder_lock = threading.Lock()
+        # 청크 분할 설정. 색인 정보에 남겨, 다른 설정으로 만든 색인으로는 답하지 않는다(409)
+        self._max_chunk_chars = settings.max_chunk_chars
+        self._chunking: dict[str, int | None] = {"max_chars": settings.max_chunk_chars}
         # 리랭커는 서버 전체에 하나다(워크스페이스마다 모델을 올리지 않는다). 넣어 준 것이
         # 설정보다 우선한다. 색인 정보에는 남기지 않는다: 색인을 바꾸지 않는다
         self._reranker_model = RERANKER_MODELS.get(settings.reranker)
@@ -679,7 +686,7 @@ class _Service:
     def _parse(self, path: Path, meta: DocMeta, workspace_id: str) -> list[Chunk]:
         """문서를 읽어 청크로 나눈다. 파싱은 메모리를 많이 쓸 수 있어 동시에 몇 개만 돌린다."""
         with self._parse_slots:
-            return chunk_document(load_document(path, meta, workspace_id))
+            return chunk_document(load_document(path, meta, workspace_id), self._max_chunk_chars)
 
     def _check_parses(self, path: Path, meta: DocMeta, workspace_id: str) -> None:
         """올린 파일을 실제로 읽어 본다. 깨졌거나 텍스트가 없거나 너무 크면 422 (색인 때가 아니라
@@ -791,9 +798,19 @@ class _Service:
         # 나오는 것보다 다시 색인하라고 하는 쪽이 안전하다
         known = isinstance(listed, list) and all(isinstance(item, str) for item in listed)
         indexed = set(listed) if known else set()
-        # 임베더가 다른 색인은 질문하면 409(다시 색인)다. 화면에서도 준비됨으로 보이지 않게 한다
-        ready = known and indexed == doc_ids and info.get("embedder") == self._embedder_name
+        # 임베더·청크 분할이 다른 색인은 질문하면 409(다시 색인)다. 화면에서도 준비됨으로 보이지
+        # 않게 한다
+        ready = (
+            known
+            and indexed == doc_ids
+            and info.get("embedder") == self._embedder_name
+            and self._chunking_matches(info)
+        )
         return IndexStatus(state="ready" if ready else "stale", chunks=chunks), indexed
+
+    def _chunking_matches(self, info: dict[str, Any]) -> bool:
+        """색인이 지금 청크 분할 설정으로 만들어졌나. 모르는 모양(손상·다른 필드)이면 False."""
+        return info.get("chunking", UNSPLIT_CHUNKING) == self._chunking
 
     def _load_records(self, workspace_id: str) -> list[tuple[DocMeta, dict[str, Any]]]:
         """문서 기록(documents/*.json)을 읽는다 → (메타, 기록) 목록, doc_id 오름차순.
@@ -942,6 +959,7 @@ class _Service:
                         "dim": embedder.dim,
                         "chunks": len(chunks),
                         "documents": doc_ids,
+                        "chunking": self._chunking,
                         "indexed_at": datetime.now(UTC).isoformat(timespec="seconds"),
                     },
                 )
@@ -971,6 +989,13 @@ class _Service:
         info = json.loads(info_path.read_text(encoding="utf-8"))
         if info.get("embedder") != self._embedder_name:
             raise stale
+        if not self._chunking_matches(info):
+            current = "없음" if self._max_chunk_chars is None else self._max_chunk_chars
+            raise IndexNotReadyError(
+                f"워크스페이스 '{workspace_id}'의 색인이 지금 청크 분할 설정"
+                f"(AXB_MAX_CHUNK_CHARS={current})과 다르게 만들어졌습니다. "
+                f"POST /workspaces/{workspace_id}/index 로 다시 색인하세요"
+            )
         embedder = self._get_embedder()
         if info.get("dim") != embedder.dim:
             raise stale

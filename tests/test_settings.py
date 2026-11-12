@@ -14,6 +14,7 @@ ENV_NAMES = [
     "AXB_ALLOWED_HOSTS",
     "AXB_RERANKER",
     "AXB_RERANK_CANDIDATES",
+    "AXB_MAX_CHUNK_CHARS",
 ]
 
 
@@ -139,3 +140,39 @@ def test_empty_reranker_values_fall_back_to_defaults(monkeypatch):
     monkeypatch.setenv("AXB_RERANK_CANDIDATES", "")
     s = Settings.from_env()
     assert (s.reranker, s.rerank_candidates) == ("none", 30)
+
+
+# ---- 긴 조항 나누기 (M-2 Task 25) ----
+
+
+def test_max_chunk_chars_is_off_by_default():
+    assert Settings.from_env().max_chunk_chars is None
+
+
+@pytest.mark.parametrize("value", ["200", "800", "20000"])
+def test_max_chunk_chars_from_env(monkeypatch, value):
+    monkeypatch.setenv("AXB_MAX_CHUNK_CHARS", value)
+    assert Settings.from_env().max_chunk_chars == int(value)
+
+
+@pytest.mark.parametrize("bad", ["0", "-1", "199", "20001", "many", "800.5", "none"])
+def test_max_chunk_chars_out_of_range_is_a_settings_error(monkeypatch, bad):
+    monkeypatch.setenv("AXB_MAX_CHUNK_CHARS", bad)
+    with pytest.raises(ValueError, match="max_chunk_chars"):
+        Settings.from_env()
+
+
+def test_empty_max_chunk_chars_means_no_split(monkeypatch):
+    monkeypatch.setenv("AXB_MAX_CHUNK_CHARS", "")
+    assert Settings.from_env().max_chunk_chars is None
+
+
+def test_max_chunk_chars_bounds_are_the_shared_constants():
+    # 하한은 나누기 함수가 받는 값, 상한은 평가 CLI(--max-chunk-chars)와 같은 값
+    from axbuilder.ingest.chunking import MIN_MAX_CHARS
+    from axbuilder.settings import MAX_CHUNK_CHARS_LIMIT
+
+    field = Settings.model_fields["max_chunk_chars"]
+    lower = next(m.ge for m in field.metadata if getattr(m, "ge", None) is not None)
+    upper = next(m.le for m in field.metadata if getattr(m, "le", None) is not None)
+    assert (lower, upper) == (MIN_MAX_CHARS, MAX_CHUNK_CHARS_LIMIT) == (200, 20_000)

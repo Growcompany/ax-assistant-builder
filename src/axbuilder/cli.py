@@ -168,6 +168,17 @@ def _report_reranker(settings: Settings) -> None:
     )
 
 
+def _report_chunking(settings: Settings) -> None:
+    # 기본(나누지 않음)이면 말하지 않는다. 바꿨으면 예전 색인이 409가 되는 이유를 미리 알린다
+    if settings.max_chunk_chars is None:
+        return
+    print(
+        f"청크 분할: {settings.max_chunk_chars}자보다 긴 본문 조항을 항·호·목·줄 경계에서, "
+        "그래도 길면 글자 수로 나눕니다(AXB_MAX_CHUNK_CHARS). "
+        "다른 설정으로 만든 색인은 다시 색인해야 질문할 수 있습니다"
+    )
+
+
 def open_browser_when_ready(
     url: str,
     port: int,
@@ -225,6 +236,7 @@ def _serve(args: argparse.Namespace) -> int:
     url = None if local_host is None else _url(local_host, args.port)
     _report_llm(settings)
     _report_reranker(settings)
+    _report_chunking(settings)
     if url is not None:
         print(f"화면: {url}  (끝내려면 Ctrl+C)")
     else:

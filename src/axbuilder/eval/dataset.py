@@ -10,6 +10,14 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 QType = Literal[
     "lookup", "table", "multi_doc", "out_of_scope", "needs_human", "no_access", "outdated"
 ]
+# 문항 태그(Task 24). 유형(qtype)과 따로, 태그별 표로 질의 성격에 따른 차이를 본다
+TAGS = (
+    "article_ref",  # 조항 번호로 묻는다("은행법 제30조의3")
+    "product_name",  # 정식 상품명으로 묻는다("AXB 든든 정기예금")
+    "negative_answer",  # 정답이 부정문이다("포함되지 않는다", "할 수 없다")
+    "paraphrase",  # 원문 문장을 바꿔 썼다
+    "internal_only",  # 근거가 internal 문서뿐이다
+)
 # ingest.chunking이 청크에 붙이는 article 라벨 형식. 이 밖의 라벨("7조", "제 7조", "제7조 ")은
 # 어떤 청크와도 같지 않아 그 근거가 오류 없이 0점이 된다
 ARTICLE_LABEL = re.compile(r"(?:부칙 )?제\d+조(?:의\d+)?|부칙")
@@ -24,6 +32,9 @@ class Evidence(BaseModel):
     doc_id: str
     article: str | None = None
     page: int | None = None
+    # 답이 든 짧은 원문 문구(Task 24). 엄격 채점(metrics.matches_strict)은 이 문구가 든 청크만
+    # 맞게 센다. 조항을 나눈 조각이나 문서 단위 근거에서 답이 없는 청크까지 정답으로 세지 않게
+    anchor: str | None = None
 
 
 class GoldItem(BaseModel):
@@ -34,6 +45,8 @@ class GoldItem(BaseModel):
     answer: str
     evidence: list[Evidence]
     qtype: QType
+    # 모르는 값도 읽어 두고 validate_golden이 알린다(Literal이면 오타 하나로 파일 전체를 못 읽는다)
+    tags: list[str] = []
 
 
 def load_golden(path: Path) -> list[GoldItem]:
@@ -75,12 +88,18 @@ def validate_golden(items: list[GoldItem], known_doc_ids: set[str]) -> list[str]
             problems.append(f"{item.id}: empty question")
         if not item.answer.strip():
             problems.append(f"{item.id}: empty answer")
+        for tag in item.tags:
+            if tag not in TAGS:
+                problems.append(f"{item.id}: unknown tag {tag!r}")
         seen_evidence: set[tuple[str, str | None, int | None]] = set()
         for ev in item.evidence:
             if ev.doc_id not in known_doc_ids:
                 problems.append(f"{item.id}: unknown doc_id {ev.doc_id!r}")
             if ev.article is not None and not ARTICLE_LABEL.fullmatch(ev.article):
                 problems.append(f"{item.id}: malformed article label {ev.article!r}")
+            if ev.anchor is not None and not ev.anchor.strip():
+                where = " ".join(part for part in (ev.doc_id, ev.article) if part)
+                problems.append(f"{item.id}: blank anchor {where}")
             key = (ev.doc_id, ev.article, ev.page)
             if key in seen_evidence:
                 where = " ".join(str(part) for part in key if part is not None)
