@@ -25,8 +25,9 @@ ENV_VARS = {
 }
 
 DEFAULT_ALLOWED_HOSTS = ("127.0.0.1", "localhost", "[::1]")
-# max_chunk_chars의 상한. 평가 CLI(--max-chunk-chars)도 같은 값을 쓴다. 나누는 대상인 본문 조항은 이 코퍼스에서
-# 가장 긴 것이 3,572자라 그보다 크면 나뉘는 것이 없다(11,452자짜리 부칙 청크는 원래 나누지 않는다)
+# max_chunk_chars의 상한. 평가 CLI(--max-chunk-chars)도 같은 값을 쓴다. 나누는 대상인 본문 조항은
+# 이 코퍼스에서 가장 긴 것이 3,572자라 그보다 크면 나뉘는 것이 없다
+# (11,452자짜리 부칙 청크는 원래 나누지 않는다)
 MAX_CHUNK_CHARS_LIMIT = 20_000
 # 호스트 이름·IPv4, 또는 대괄호로 싼 IPv6. 포트·스킴·경로는 받지 않는다
 _HOST_NAME = re.compile(r"\[[0-9a-f:.]+\]|[a-z0-9]([a-z0-9.-]*[a-z0-9])?")
