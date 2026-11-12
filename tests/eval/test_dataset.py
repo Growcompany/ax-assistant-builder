@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from axbuilder.corpus import MANIFEST_NAME, load_sources, source_file
-from axbuilder.eval.dataset import Evidence, GoldItem, load_golden, validate_golden
+from axbuilder.eval.dataset import TAGS, Evidence, GoldItem, load_golden, validate_golden
 from axbuilder.eval.metrics import matches
 from axbuilder.generation.answer import REFUSAL_TEXT
 from axbuilder.ingest.chunking import chunk_document
@@ -77,6 +77,13 @@ def test_load_golden_reads_one_item_per_line(tmp_path):
     assert items[0].evidence == [Evidence(doc_id="banking-act", article="제30조의3")]
     # 조항이 없는 문서 단위 근거: article·page는 None
     assert items[1].evidence[0].article is None and items[1].evidence[0].page is None
+
+
+def test_tags_are_optional_and_default_to_empty(tmp_path):
+    # v0 문항(태그 없음)과 v1 문항(태그 있음)이 한 파일에 섞여도 읽힌다
+    path = write_lines(tmp_path, [line(), line(id="bank-002", tags=["article_ref"])])
+    items = load_golden(path)
+    assert items[0].tags == [] and items[1].tags == ["article_ref"]
 
 
 def test_load_golden_keeps_unicode_line_separator_inside_a_line(tmp_path):
@@ -186,6 +193,26 @@ def test_validate_reports_duplicate_evidence():
     ev = {"doc_id": "banking-act", "article": "제30조의3"}
     item = gold(evidence=[ev, {"doc_id": "prod-fixed-deposit"}, ev], qtype="multi_doc")
     assert validate_golden([item], KNOWN) == ["bank-001: duplicate evidence banking-act 제30조의3"]
+
+
+def test_tag_vocabulary_is_the_plan_list():
+    assert TAGS == (
+        "article_ref",
+        "product_name",
+        "negative_answer",
+        "paraphrase",
+        "internal_only",
+    )
+
+
+def test_validate_accepts_known_tags():
+    assert validate_golden([gold(tags=list(TAGS))], KNOWN) == []
+
+
+def test_validate_reports_unknown_tag():
+    # 오타 태그("article-ref")는 태그별 표에서 조용히 빠지므로 알린다
+    item = gold(tags=["article_ref", "article-ref"])
+    assert validate_golden([item], KNOWN) == ["bank-001: unknown tag 'article-ref'"]
 
 
 def test_validate_reports_blank_question_and_answer():

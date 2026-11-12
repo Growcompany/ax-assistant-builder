@@ -26,7 +26,7 @@ from typing import Any, get_args
 from pydantic import BaseModel, Field
 
 from axbuilder.corpus import CorpusSource, load_sources, source_file
-from axbuilder.eval.dataset import Evidence, GoldItem, QType, load_golden, validate_golden
+from axbuilder.eval.dataset import TAGS, Evidence, GoldItem, QType, load_golden, validate_golden
 from axbuilder.eval.metrics import (
     citation_precision,
     grounded_refusal_correct,
@@ -84,6 +84,8 @@ class EvalReport(BaseModel):
     grounded_refusals: int | None = None  # 근거가 없어서 거절 (범위 밖 포함)
     ungrounded_answers: int | None = None  # 근거가 없는데 답함 (환각 위험 신호)
     by_qtype: dict[str, dict[str, float]]  # qtype → {"n", 지표...} (잴 수 없는 지표는 빠짐)
+    # 태그 → by_qtype과 같은 요약(Task 24). 태그가 있는 문항만, 예전 보고서에는 없어 기본값을 둔다
+    by_tag: dict[str, dict[str, float]] = Field(default_factory=dict)
     items: list[dict]  # 문항별 기록: 검색 결과·적중 여부·답변·지연 (실패 사례 분석용)
     # 계획의 Interfaces에 없는 필드: 색인·평가 시간과 질문당 지연(초·밀리초). 결과라 config와 나눈다
     timing: dict[str, float] = Field(default_factory=dict)
@@ -139,6 +141,11 @@ def run_eval(
         for qtype in QTYPE_ORDER
         if qtype in present
     }
+    by_tag = {
+        tag: summarize([r for r in records if tag in r["tags"]])
+        for tag in TAGS
+        if any(tag in r["tags"] for r in records)
+    }
     latencies = [r["latency_ms"] for r in records]
     return EvalReport(
         config={
@@ -160,6 +167,7 @@ def run_eval(
         grounded_refusals=overall.get("grounded_refusals"),
         ungrounded_answers=overall.get("ungrounded_answers"),
         by_qtype=by_qtype,
+        by_tag=by_tag,
         items=records,
         timing={
             "eval_seconds": eval_seconds,
@@ -187,6 +195,7 @@ def _record(
     record: dict[str, Any] = {
         "id": item.id,
         "qtype": item.qtype,
+        "tags": list(item.tags),
         "question": item.question,
         "evidence": [_label(ev) for ev in item.evidence],
         # 문서 단위 근거(article·page 없음)는 그 문서의 아무 청크나 맞아 지표가 후해진다
@@ -294,7 +303,7 @@ def load_corpus_chunks(
 
 
 def format_markdown(report: EvalReport) -> str:
-    """전체·qtype별·근거 단위별 표. 근거 단위별 행으로 문서 단위 근거의 부풀림을 본다.
+    """전체·qtype별·근거 단위별·태그별 표. 근거 단위별 행으로 문서 단위 근거의 부풀림을 본다.
 
     LLM 표는 지표마다 분모가 달라 "근거 n"(Recall·MRR의 분모)과 "인용 n"(인용 정밀도의
     분모) 열을 함께 보여 준다. 거절 정확도의 분모는 n이다.
@@ -342,6 +351,8 @@ def format_markdown(report: EvalReport) -> str:
         rows.append(row("조항 단위 근거만", summarize(article_only), article_only))
     if doc_level:
         rows.append(row("문서 단위 근거 포함", summarize(doc_level), doc_level))
+    for tag, summary in report.by_tag.items():
+        rows.append(row(f"태그 {tag}", summary, [r for r in report.items if tag in r["tags"]]))
 
     levels = ", ".join(config.get("access_levels", []))
     retriever = config.get("retriever", "?")

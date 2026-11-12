@@ -133,6 +133,70 @@ def test_retrieval_only_records_each_item(fake_retriever):
     json.dumps(report.model_dump(mode="json"), ensure_ascii=False)  # 보고서는 JSON으로 저장된다
 
 
+def tagged_items() -> list[GoldItem]:
+    # q1: 조항 번호 질의, q2: 상품명 질의이면서 부정문 정답, q3: 범위 밖(태그 없음)
+    q1, q2, q3 = items_with_one_oos
+    return [
+        q1.model_copy(update={"tags": ["article_ref"]}),
+        q2.model_copy(update={"tags": ["product_name", "negative_answer"]}),
+        q3,
+    ]
+
+
+def test_by_tag_summarizes_each_tag_present(fake_retriever):
+    report = run_eval(tagged_items(), fake_retriever, k=5, llm=None, workspace=ws, role="준법감시")
+    # 태그 순서는 TAGS 순서. 한 문항이 태그 두 개를 가지면 두 행에 모두 들어간다
+    assert report.by_tag == {
+        "article_ref": {"n": 1, "recall_at_k": 1.0, "mrr": 1.0},
+        "product_name": {"n": 1, "recall_at_k": 0.0, "mrr": 0.0},
+        "negative_answer": {"n": 1, "recall_at_k": 0.0, "mrr": 0.0},
+    }
+    tags = [r["tags"] for r in report.items]
+    assert tags == [["article_ref"], ["product_name", "negative_answer"]]
+
+
+def test_by_tag_with_llm_has_answer_metrics(fake_retriever):
+    report = run_eval(
+        tagged_items(), fake_retriever, k=5, llm=FakeLLM("답 [1]."), workspace=ws, role="준법감시"
+    )
+    assert report.by_tag["negative_answer"]["refusal_accuracy"] == 1.0  # 답해야 하는 문항에 답했다
+    assert report.by_tag["negative_answer"]["citation_precision"] == 0.0
+
+
+def test_untagged_golden_set_has_empty_by_tag(fake_retriever):
+    report = run_eval(
+        items_with_one_oos, fake_retriever, k=5, llm=None, workspace=ws, role="준법감시"
+    )
+    assert report.by_tag == {}
+    assert not any(line.startswith("| 태그 ") for line in format_markdown(report).splitlines())
+
+
+def test_report_without_by_tag_still_loads():
+    # Task 24 전의 보고서에는 by_tag가 없다
+    old = {
+        "config": {},
+        "n": 1,
+        "recall_at_k": 1.0,
+        "mrr": 1.0,
+        "citation_precision": None,
+        "refusal_accuracy": None,
+        "by_qtype": {},
+        "items": [],
+    }
+    assert EvalReport.model_validate(old).by_tag == {}
+
+
+def test_format_markdown_has_a_row_per_tag_below_the_other_rows(fake_retriever):
+    report = run_eval(tagged_items(), fake_retriever, k=5, llm=None, workspace=ws, role="준법감시")
+    lines = format_markdown(report).splitlines()
+    rows = [line for line in lines if line.startswith("| ")][1:]  # 머리행 제외
+    assert rows[-3:] == [
+        "| 태그 article_ref | 1 | 1.000 | 1.000 |",
+        "| 태그 product_name | 1 | 0.000 | 0.000 |",
+        "| 태그 negative_answer | 1 | 0.000 | 0.000 |",
+    ]
+
+
 def test_k_cuts_the_ranking(fake_retriever):
     report = run_eval(
         items_with_one_oos, fake_retriever, k=1, llm=None, workspace=ws, role="준법감시"
