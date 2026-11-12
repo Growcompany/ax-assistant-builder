@@ -109,26 +109,30 @@ _SENTENCE_BREAK = re.compile(r"\n+|(?<=[.!?。])\s+")
 _BULLET = re.compile(r"^(?:[-*•·]\s+|#+\s+)+")
 
 
-def _sentences(text: str) -> list[tuple[str, bool]]:
-    """(문장, 인용 표시로 끝나는가)의 목록. 인용 표시와 마크다운 꾸밈은 지운다.
+def _sentences(text: str) -> list[tuple[str, bool, bool]]:
+    """(문장, 인용으로 끝나는가, 인용이 들어 있는가)의 목록. 인용 표시와 마크다운 꾸밈은 지운다.
 
     글자가 없는 조각은 버린다. 다만 인용 표시뿐인 조각("…없습니다. [1]"의 "[1]")은 앞 문장에
     붙은 인용으로 본다.
     """
     marked = _REFERENCE.sub(f" {_CITED} ", text.replace(_CITED, "")).replace("**", "")
-    result: list[tuple[str, bool]] = []
+    result: list[tuple[str, bool, bool]] = []
     for part in _SENTENCE_BREAK.split(marked.replace("`", "")):
         part = _BULLET.sub("", part.strip())
         plain = part.replace(_CITED, " ").strip()
         if _WORD.search(plain):
-            result.append((plain, bool(_ENDS_WITH_CITATION.search(part))))
+            result.append((plain, bool(_ENDS_WITH_CITATION.search(part)), _CITED in part))
         elif _CITED in part and result:
-            result[-1] = (result[-1][0], True)
+            result[-1] = (result[-1][0], True, True)
     return result
 
 
-def _is_absence_statement(sentence: str, cited: bool) -> bool:
+def _is_absence_statement(sentence: str, cited: bool, has_citation: bool = False) -> bool:
     if cited or _DIGIT.search(sentence) or _SOURCE.search(sentence):
+        return False
+    # "제공된 자료 [1]로는 …할 수 없습니다": 거절 문구와 같은 꼴이어도 그 문장 안에 인용을 달았으면
+    # 자료가 그렇게 말한다는 답이다(인용은 "근거가 있다"는 주장이다)
+    if has_citation and _QUALIFIER.search(sentence):
         return False
     unknown = _QUALIFIER.search(sentence) and _UNKNOWN.search(sentence)
     if not unknown and not _MISSING.search(sentence):
@@ -146,7 +150,7 @@ def _is_paraphrase(text: str) -> bool:
     sentences = _sentences(text)
     if not sentences or not _QUALIFIER.search(sentences[0][0]):
         return False
-    return all(_is_absence_statement(sentence, cited) for sentence, cited in sentences)
+    return all(_is_absence_statement(*sentence) for sentence in sentences)
 
 
 def classify_refusal(text: str) -> RefusalKind:

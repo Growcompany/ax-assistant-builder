@@ -175,6 +175,9 @@ REVIEW_B1 = [
 ]
 
 NEGATIVE_ANSWERS = [
+    # 2차 리뷰: 인용이 문장 끝이 아니라 가운데 있어도 답이다
+    "제공된 자료 [1]로는 전화로 본인 여부를 확인할 수 없습니다.",
+    "제공된 자료로는 [1] 전화로 본인 여부를 확인할 수 없습니다.",
     # 출처 표지: 따르면, 의하면, 에서는, 명시된 바로는
     "자료에 따르면 대리인은 위임장 없이 본인 여부를 확인할 수 없습니다.",
     "자료 [1]에 따르면 은행은 계약 체결 전에는 고객의 신용정보를 확인할 수 없습니다.",
@@ -234,7 +237,7 @@ def test_negative_statements_about_what_the_material_says_are_none(reply):
 def test_known_limit_same_words_as_the_refusal_template():
     # 규칙으로 가를 수 없는 경계를 숨기지 않고 적어 둔다. "제공된 자료로는 X를 확인할 수 없습니다"는
     # 프롬프트의 거절 문구에 X만 끼운 꼴이라, 모델이 "자료에 따르면 X를 확인할 수 없다"는 뜻으로
-    # 썼더라도(인용 없이) 거절로 판정된다. 인용을 달면 답으로 본다
+    # 썼더라도(인용 없이) 거절로 판정된다. 그 문장에 인용을 달면(끝이든 가운데든) 답으로 본다
     ambiguous = "제공된 자료로는 전화로 본인 여부를 확인할 수 없습니다."
     assert classify_refusal(ambiguous) is RefusalKind.PARAPHRASE
     assert classify_refusal(ambiguous[:-1] + " [1].") is RefusalKind.NONE
