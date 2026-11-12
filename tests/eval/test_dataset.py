@@ -70,6 +70,17 @@ def test_repo_golden_set_tag_minimums():
     assert all(not item.tags for item in load_golden(GOLDEN)[:50])  # v0 문항에는 태그가 없다
 
 
+def test_repo_every_evidence_has_a_short_anchor():
+    # 답 문구(anchor): 근거마다 답이 든 원문 문구 10~40자(공백은 하나로 센다)
+    bad = [
+        f"{item.id}: {ev.doc_id} {ev.article} {ev.anchor!r}"
+        for item in load_golden(GOLDEN)
+        for ev in item.evidence
+        if ev.anchor is None or not 10 <= len(" ".join(ev.anchor.split())) <= 40
+    ]
+    assert bad == []
+
+
 def test_repo_internal_only_tag_matches_evidence_access_levels():
     # internal_only = 근거가 모두 internal 문서. 상담원 역할 평가에서 "거절해야 맞는" 문항이 된다.
     # 태그는 v1의 새 문항(51번부터)에만 달았다. v0 50문항은 태그 없이 둔다
