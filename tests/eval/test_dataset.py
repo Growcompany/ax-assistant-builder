@@ -53,12 +53,35 @@ def test_repo_golden_set_is_valid():
 
 
 def test_repo_golden_set_distribution():
+    # v1(Task 24): v0 50문항(30/8/6/6) + 새 100문항(52/14/17/17)
     items = load_golden(GOLDEN)
     counts = Counter(item.qtype for item in items)
-    assert counts == {"lookup": 30, "table": 8, "multi_doc": 6, "out_of_scope": 6}
+    assert counts == {"lookup": 82, "table": 22, "multi_doc": 23, "out_of_scope": 23}
     for item in items:
         if item.qtype == "out_of_scope":
             assert item.answer == REFUSAL_TEXT, item.id
+
+
+def test_repo_golden_set_tag_minimums():
+    # 계획 Task 24의 최소 수: 조항 번호 질의 15, 정식 상품명 질의 10, 부정문 정답 10
+    tags = Counter(tag for item in load_golden(GOLDEN) for tag in item.tags)
+    assert tags["article_ref"] >= 15 and tags["product_name"] >= 10
+    assert tags["negative_answer"] >= 10
+    assert all(not item.tags for item in load_golden(GOLDEN)[:50])  # v0 문항에는 태그가 없다
+
+
+def test_repo_internal_only_tag_matches_evidence_access_levels():
+    # internal_only = 근거가 모두 internal 문서. 상담원 역할 평가에서 "거절해야 맞는" 문항이 된다.
+    # 태그는 v1의 새 문항(51번부터)에만 달았다. v0 50문항은 태그 없이 둔다
+    level = {s.doc_id: s.access_level for s in load_sources(SOURCES)}
+    wrong = [
+        item.id
+        for item in load_golden(GOLDEN)[50:]
+        if item.evidence
+        and ("internal_only" in item.tags)
+        != all(level[ev.doc_id] == "internal" for ev in item.evidence)
+    ]
+    assert wrong == []
 
 
 # ---- load_golden ----
