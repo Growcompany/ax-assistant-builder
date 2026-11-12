@@ -34,7 +34,9 @@ from axbuilder.eval.metrics import (
     grounded_refusal_correct,
     matches,
     recall_at_k,
+    recall_at_k_strict,
     reciprocal_rank,
+    reciprocal_rank_strict,
     refusal_correct,
 )
 from axbuilder.generation.answer import answer
@@ -76,6 +78,9 @@ class EvalReport(BaseModel):
     n: int  # 채점한 문항 수 (검색 지표만이면 out_of_scope 제외)
     recall_at_k: float  # 근거가 있는 문항의 평균
     mrr: float
+    # 답 문구(anchor) 기준 Recall·MRR(Task 24). 골든셋에 anchor가 하나도 없으면 None
+    recall_at_k_strict: float | None = None
+    mrr_strict: float | None = None
     citation_precision: float | None  # 인용이 하나라도 있는 문항의 평균. LLM 없이는 None
     refusal_accuracy: float | None  # LLM 없이는 None
     # 정해진 문구(EXACT)만 거절로 센 값 = v0.2.0까지의 규칙. 예전 보고서에는 없어 기본값을 둔다
@@ -110,6 +115,8 @@ def run_eval(
     if not any(item.evidence for item in scored):
         raise ValueError("no golden items with evidence to score")
 
+    # 답 문구가 있는 근거가 하나라도 있을 때만 엄격 지표를 단다(없으면 보고서가 이전과 같다)
+    strict = any(ev.anchor for item in scored for ev in item.evidence)
     records = []
     started = time.perf_counter()
     for item in scored:
@@ -133,7 +140,7 @@ def run_eval(
                 ) from e
             retrieved = result.retrieved
         latency_ms = (time.perf_counter() - t0) * 1000
-        records.append(_record(item, retrieved, k, result, latency_ms))
+        records.append(_record(item, retrieved, k, result, latency_ms, strict))
     eval_seconds = time.perf_counter() - started
 
     overall = summarize(records)
@@ -161,6 +168,8 @@ def run_eval(
         n=len(records),
         recall_at_k=overall["recall_at_k"],
         mrr=overall["mrr"],
+        recall_at_k_strict=overall.get("recall_at_k_strict"),
+        mrr_strict=overall.get("mrr_strict"),
         citation_precision=overall.get("citation_precision"),
         refusal_accuracy=overall.get("refusal_accuracy"),
         refusal_accuracy_strict=overall.get("refusal_accuracy_strict"),
@@ -191,6 +200,7 @@ def _record(
     k: int,
     result: Answer | None,
     latency_ms: float,
+    strict: bool = False,
 ) -> dict[str, Any]:
     chunks = [s.chunk for s in retrieved][: max(k, 0)]
     has_evidence = bool(item.evidence)
@@ -217,6 +227,13 @@ def _record(
         "reciprocal_rank": reciprocal_rank(chunks, item.evidence) if has_evidence else None,
         "latency_ms": latency_ms,
     }
+    if strict:
+        record["recall_at_k_strict"] = (
+            recall_at_k_strict(chunks, item.evidence, k) if has_evidence else None
+        )
+        record["reciprocal_rank_strict"] = (
+            reciprocal_rank_strict(chunks, item.evidence) if has_evidence else None
+        )
     if result is not None:
         # 근거가 둘인 문항에서 하나만 들어와도 "있음". 범위 밖 문항은 근거가 없어 늘 False
         evidence_in_context = bool(record["recall_at_k"])
@@ -247,6 +264,8 @@ def _record(
 _SUMMARY_KEYS = {
     "recall_at_k": "recall_at_k",
     "mrr": "reciprocal_rank",
+    "recall_at_k_strict": "recall_at_k_strict",
+    "mrr_strict": "reciprocal_rank_strict",
     "citation_precision": "citation_precision",
     "refusal_accuracy": "refusal_correct",
     "refusal_accuracy_strict": "refusal_correct_strict",
@@ -320,6 +339,9 @@ def format_markdown(report: EvalReport) -> str:
     k = config.get("k")
     # (열 이름, 지표 이름, 분모 열인가) — 분모 열은 그 지표 값이 있는 문항 수를 센다
     layout = [(f"Recall@{k}", "recall_at_k", False), ("MRR", "mrr", False)]
+    if report.recall_at_k_strict is not None:
+        layout += [(f"Recall@{k}(답 문구)", "recall_at_k_strict", False)]
+        layout += [("MRR(답 문구)", "mrr_strict", False)]
     if with_llm:
         layout = [
             ("근거 n", "recall_at_k", True),

@@ -8,7 +8,7 @@ import pytest
 
 from axbuilder.corpus import MANIFEST_NAME, load_sources, source_file
 from axbuilder.eval.dataset import TAGS, Evidence, GoldItem, load_golden, validate_golden
-from axbuilder.eval.metrics import matches
+from axbuilder.eval.metrics import matches, matches_strict
 from axbuilder.generation.answer import REFUSAL_TEXT
 from axbuilder.ingest.chunking import chunk_document
 from axbuilder.ingest.loaders import load_document
@@ -107,6 +107,14 @@ def test_tags_are_optional_and_default_to_empty(tmp_path):
     path = write_lines(tmp_path, [line(), line(id="bank-002", tags=["article_ref"])])
     items = load_golden(path)
     assert items[0].tags == [] and items[1].tags == ["article_ref"]
+
+
+def test_anchor_is_optional(tmp_path):
+    ev = [{"doc_id": "banking-act", "article": "제30조의3", "anchor": "지급준비금"}]
+    path = write_lines(tmp_path, [line(), line(id="bank-002", evidence=ev)])
+    items = load_golden(path)
+    assert items[0].evidence[0].anchor is None
+    assert items[1].evidence[0].anchor == "지급준비금"
 
 
 def test_load_golden_keeps_unicode_line_separator_inside_a_line(tmp_path):
@@ -238,6 +246,13 @@ def test_validate_reports_unknown_tag():
     assert validate_golden([item], KNOWN) == ["bank-001: unknown tag 'article-ref'"]
 
 
+@pytest.mark.parametrize("anchor", ["", "  "])
+def test_validate_reports_blank_anchor(anchor):
+    # 빈 문구는 모든 청크 본문에 "들어 있어" 엄격 채점이 조용히 느슨해진다
+    item = gold(evidence=[{"doc_id": "banking-act", "article": "제30조의3", "anchor": anchor}])
+    assert validate_golden([item], KNOWN) == ["bank-001: blank anchor banking-act 제30조의3"]
+
+
 def test_validate_reports_blank_question_and_answer():
     assert validate_golden([gold(question=" ", answer="")], KNOWN) == [
         "bank-001: empty question",
@@ -267,7 +282,7 @@ def test_validate_reports_every_problem_not_just_the_first():
 # 채점은 평가 실행기와 같은 metrics.matches()로 한다(두 규칙이 갈라지지 않게).
 
 
-def chunk_corpus(raw_dir: Path) -> dict[str, list[Chunk]]:
+def chunk_corpus(raw_dir: Path, max_chars: int | None = None) -> dict[str, list[Chunk]]:
     """doc_id → 실제 청크. url 문서는 raw_dir에 manifest가 있을 때만(그때는 빠짐없이) 나눈다."""
     downloaded = (raw_dir / MANIFEST_NAME).is_file()
     chunks: dict[str, list[Chunk]] = {}
@@ -276,16 +291,30 @@ def chunk_corpus(raw_dir: Path) -> dict[str, list[Chunk]]:
             continue  # 원문을 받지 않은 환경(CI): python scripts/download_corpus.py bank
         path = source_file(source, raw_dir, REPO_ROOT)
         assert path.is_file(), f"{source.doc_id}: {path} missing; re-run download_corpus.py bank"
-        chunks[source.doc_id] = chunk_document(load_document(path, source.doc_meta(), "bank"))
+        doc = load_document(path, source.doc_meta(), "bank")
+        chunks[source.doc_id] = chunk_document(doc, max_chars)
     return chunks
+
+
+def raw_dir() -> Path:
+    data_dir = Settings.from_env().data_dir
+    if not data_dir.is_absolute():
+        data_dir = REPO_ROOT / data_dir
+    return data_dir / "workspaces" / "bank" / "raw"
 
 
 @pytest.fixture(scope="module")
 def real_chunks() -> dict[str, list[Chunk]]:
-    data_dir = Settings.from_env().data_dir
-    if not data_dir.is_absolute():
-        data_dir = REPO_ROOT / data_dir
-    return chunk_corpus(data_dir / "workspaces" / "bank" / "raw")
+    return chunk_corpus(raw_dir())
+
+
+# Task 25의 항 단위 분할에서 실험할 값. 답 문구가 조각 경계에 걸려 잘리면 엄격 채점에서 0점이 된다
+SPLIT_MAX_CHARS = 800
+
+
+@pytest.fixture(scope="module")
+def split_chunks() -> dict[str, list[Chunk]]:
+    return chunk_corpus(raw_dir(), SPLIT_MAX_CHARS)
 
 
 def checkable_evidence(real_chunks: dict[str, list[Chunk]]) -> list[tuple[GoldItem, Evidence]]:
@@ -325,3 +354,15 @@ def test_golden_article_labels_match_exactly_one_chunk(real_chunks):
         and (n := sum(matches(chunk, ev) for chunk in real_chunks[ev.doc_id])) != 1
     }
     assert ambiguous == {}
+
+
+@pytest.mark.parametrize("corpus", ["real_chunks", "split_chunks"])
+def test_every_golden_anchor_is_in_a_matching_chunk(corpus, request):
+    # 기본 분할과 800자 분할 모두에서, 답 문구가 그 근거와 맞는 청크 중 적어도 하나에 통째로 있다
+    chunks = request.getfixturevalue(corpus)
+    missed = [
+        f"{item.id}: {ev.doc_id} {ev.article or '(문서 단위)'} {ev.anchor!r}"
+        for item, ev in checkable_evidence(chunks)
+        if not any(matches_strict(chunk, ev) for chunk in chunks[ev.doc_id])
+    ]
+    assert missed == []

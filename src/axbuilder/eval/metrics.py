@@ -1,5 +1,7 @@
 """검색·답변 지표. 근거(Evidence)와 청크·인용의 위치를 같은 규칙(matches)으로 비교한다."""
 
+from collections.abc import Callable
+
 from axbuilder.eval.dataset import Evidence
 from axbuilder.models import Chunk, Citation
 
@@ -20,22 +22,54 @@ def matches(chunk: Chunk, ev: Evidence) -> bool:
     return _same_place(chunk.doc_id, chunk.article, chunk.page, ev)
 
 
-def recall_at_k(retrieved: list[Chunk], evidence: list[Evidence], k: int) -> float:
-    """상위 k개 청크로 맞춘 근거의 비율. 근거 하나를 여러 청크가 맞혀도 한 번만 센다."""
+def matches_strict(chunk: Chunk, ev: Evidence) -> bool:
+    """matches이고, ev.anchor가 있으면 청크 본문에 그 문구가 들어 있다(anchor가 없으면 matches).
+
+    조항을 나눈 조각이나 문서 단위 근거(상품설명서)는 라벨만으로는 답이 없는 청크도 맞는다.
+    공백(줄바꿈·연속 공백)은 양쪽 모두 하나로 맞춘 뒤 부분 문자열로 비교한다.
+    """
+    return matches(chunk, ev) and (
+        ev.anchor is None or " ".join(ev.anchor.split()) in " ".join(chunk.text.split())
+    )
+
+
+Matcher = Callable[[Chunk, Evidence], bool]
+
+
+def _recall(retrieved: list[Chunk], evidence: list[Evidence], k: int, match: Matcher) -> float:
     if not evidence:
         # 범위 밖 문항처럼 근거가 없으면 비율을 정의할 수 없다. 0이나 1로 채우면 평균이 왜곡된다
         raise ValueError("recall@k is undefined without evidence")
     top = retrieved[: max(k, 0)]
-    found = sum(any(matches(chunk, ev) for chunk in top) for ev in evidence)
+    found = sum(any(match(chunk, ev) for chunk in top) for ev in evidence)
     return found / len(evidence)
+
+
+def _reciprocal_rank(retrieved: list[Chunk], evidence: list[Evidence], match: Matcher) -> float:
+    for rank, chunk in enumerate(retrieved, start=1):
+        if any(match(chunk, ev) for ev in evidence):
+            return 1 / rank
+    return 0.0
+
+
+def recall_at_k(retrieved: list[Chunk], evidence: list[Evidence], k: int) -> float:
+    """상위 k개 청크로 맞춘 근거의 비율. 근거 하나를 여러 청크가 맞혀도 한 번만 센다."""
+    return _recall(retrieved, evidence, k, matches)
 
 
 def reciprocal_rank(retrieved: list[Chunk], evidence: list[Evidence]) -> float:
     """어느 근거든 처음 맞는 청크 순위(1부터)의 역수. 없으면 0."""
-    for rank, chunk in enumerate(retrieved, start=1):
-        if any(matches(chunk, ev) for ev in evidence):
-            return 1 / rank
-    return 0.0
+    return _reciprocal_rank(retrieved, evidence, matches)
+
+
+def recall_at_k_strict(retrieved: list[Chunk], evidence: list[Evidence], k: int) -> float:
+    """recall_at_k와 같되 matches_strict로 센다(답 문구가 든 청크만)."""
+    return _recall(retrieved, evidence, k, matches_strict)
+
+
+def reciprocal_rank_strict(retrieved: list[Chunk], evidence: list[Evidence]) -> float:
+    """reciprocal_rank와 같되 matches_strict로 센다."""
+    return _reciprocal_rank(retrieved, evidence, matches_strict)
 
 
 def citation_precision(citations: list[Citation], evidence: list[Evidence]) -> float | None:

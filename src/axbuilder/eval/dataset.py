@@ -32,6 +32,9 @@ class Evidence(BaseModel):
     doc_id: str
     article: str | None = None
     page: int | None = None
+    # 답이 든 짧은 원문 문구(Task 24). 엄격 채점(metrics.matches_strict)은 이 문구가 든 청크만
+    # 맞게 센다. 조항을 나눈 조각이나 문서 단위 근거에서 답이 없는 청크까지 정답으로 세지 않게
+    anchor: str | None = None
 
 
 class GoldItem(BaseModel):
@@ -94,6 +97,9 @@ def validate_golden(items: list[GoldItem], known_doc_ids: set[str]) -> list[str]
                 problems.append(f"{item.id}: unknown doc_id {ev.doc_id!r}")
             if ev.article is not None and not ARTICLE_LABEL.fullmatch(ev.article):
                 problems.append(f"{item.id}: malformed article label {ev.article!r}")
+            if ev.anchor is not None and not ev.anchor.strip():
+                where = " ".join(part for part in (ev.doc_id, ev.article) if part)
+                problems.append(f"{item.id}: blank anchor {where}")
             key = (ev.doc_id, ev.article, ev.page)
             if key in seen_evidence:
                 where = " ".join(str(part) for part in key if part is not None)
