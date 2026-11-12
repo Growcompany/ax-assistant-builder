@@ -21,6 +21,7 @@ ENV_VARS = {
     "api_docs": "AXB_API_DOCS",
     "reranker": "AXB_RERANKER",
     "rerank_candidates": "AXB_RERANK_CANDIDATES",
+    "max_chunk_chars": "AXB_MAX_CHUNK_CHARS",
 }
 
 DEFAULT_ALLOWED_HOSTS = ("127.0.0.1", "localhost", "[::1]")
@@ -56,6 +57,9 @@ class Settings(BaseModel):
     reranker: Literal["none", "kure-nano", "bge-v2-m3"] = "none"
     # 리랭커에 넘기는 후보 수. 리랭커가 꺼져 있으면 쓰지 않는다
     rerank_candidates: int = Field(default=30, ge=1, le=200)
+    # 본문 조항이 이 글자 수보다 길면 항·호 경계에서 나눈다(axbuilder.ingest.chunking). 기본 None은
+    # 나누지 않는다. 색인에 남고, 바꾸면 다시 색인해야 한다. 하한은 chunking.MIN_MAX_CHARS와 같다
+    max_chunk_chars: int | None = Field(default=None, ge=200, le=20_000)
 
     @field_validator("cors_origins", mode="before")
     @classmethod
