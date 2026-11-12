@@ -1,4 +1,9 @@
-"""Document를 검색 단위 Chunk로 나눈다: 조항 단위, 또는 고정 길이 + 겹침."""
+"""Document를 검색 단위 Chunk로 나눈다: 조항 단위, 또는 고정 길이 + 겹침.
+
+조항 단위에서 max_chars를 주면 그보다 긴 본문 조항을 항 → 호 → 목 → 줄 → 글자 수 순서의 경계에서
+나누고, 이웃 조각을 max_chars 안에서 욕심내어 묶는다(긴 조항의 뒤쪽 항이 리랭커 입력 512토큰에서
+잘려 나가지 않게). 둘째 조각부터 조항 머리 줄을 붙인다.
+"""
 
 import bisect
 import re
@@ -27,17 +32,39 @@ REWRITTEN_ARTICLE_BEFORE = re.compile(
     r"조(?:의\d+)?[을를][ \t]+(?:각각[ \t]+)?다음과[ \t]+같이[ \t]+(?:신설)?한다\.\s*$"
 )
 
+# 긴 조항을 나눌 때 조각에 붙이는 조항 머리: "제11조(대리인 거래)", "제5조 (특례)", 제목이 없으면
+# "제7조". 제목 괄호가 80자를 넘으면(머리가 아닐 수 있다) 조 번호만 쓴다
+ARTICLE_HEAD = re.compile(r"제\d+조(?:의\d+)?(?:[ \t]*[(（][^()（）\n]{1,80}[)）])?")
+# 조항을 나누는 경계. 앞의 것부터 쓰고, 그래도 긴 덩어리만 다음 경계로 더 나눈다.
+# 항: 줄 맨 앞의 원문자 ①~⑳, ㉑~㉟, ㊱~㊿ (법령 원문에 ㊿까지 있고, 뒤에 공백이 없기도 하다:
+#     "①이 법은")
+# 호: 줄 맨 앞의 "1. " "2의2. "   목: 줄 맨 앞의 "가. " "나. "   줄: 비지 않은 줄의 맨 앞
+SPLIT_LEVELS = (
+    re.compile(r"^[ \t]*[①-⑳㉑-㉟㊱-㊿]", re.MULTILINE),
+    re.compile(r"^[ \t]*\d{1,3}(?:의\d{1,2})?\.[ \t]", re.MULTILINE),
+    re.compile(r"^[ \t]*[가나다라마바사아자차카타파하]\.[ \t]", re.MULTILINE),
+    re.compile(r"^(?=[ \t]*\S)", re.MULTILINE),
+)
+# max_chars의 하한. 조항 머리(이 코퍼스에서 최대 47자, 제목은 80자까지 머리로 본다)를 붙이고도
+# 본문이 들어갈 자리가 남아야 한다. Settings.max_chunk_chars의 하한과 같다
+MIN_MAX_CHARS = 200
+
 # (원문에서의 시작 위치, 청크 본문, 조 번호)
 Piece = tuple[int, str, str | None]
 
 
-def chunk_by_article(doc: Document) -> list[Chunk]:
+def chunk_by_article(doc: Document, max_chars: int | None = None) -> list[Chunk]:
     """조항 머리부터 다음 조항 머리 앞까지를 한 청크로. 첫 조항 앞 글은 article=None 청크.
 
     부칙 줄 뒤의 조항은 article을 "부칙 제N조"로 붙여 본문 조항과 겹치지 않게 한다. 부칙 머리 줄은
     그 부칙의 첫 조항 청크 앞에 붙이고, 조항 없이 본문만 있는 부칙은 article="부칙" 청크가 된다.
     부칙 안에서 다른 법률을 고치는 줄은 조항 머리로 보지 않고 앞 부칙 조항 본문에 둔다.
+
+    max_chars가 있으면 그보다 긴 본문 조항을 여러 청크로 나눈다(_split_article). article·page는
+    원래 조항 그대로라 근거 라벨이 같은 규칙으로 맞는다. 첫 조항 앞 글과 부칙은 나누지 않는다.
+    None이면 나누지 않는다(나누기 전과 같은 결과).
     """
+    _check_max_chars(max_chars)
     text, page_at = _join_pages(doc)
     starts: list[int] = [0]
     articles: list[str | None] = [None]
@@ -61,6 +88,8 @@ def chunk_by_article(doc: Document) -> list[Chunk]:
         body = text[start:end]
         if body.strip():
             pieces.append((start + _leading_space(body), body.strip(), article))
+    if max_chars is not None:
+        pieces = [part for piece in pieces for part in _split_article(piece, max_chars)]
     return _to_chunks(doc, pieces, page_at)
 
 
@@ -81,15 +110,95 @@ def chunk_fixed(doc: Document, size: int = 800, overlap: int = 100) -> list[Chun
     return _to_chunks(doc, pieces, page_at)
 
 
-def chunk_document(doc: Document) -> list[Chunk]:
+def chunk_document(doc: Document, max_chars: int | None = None) -> list[Chunk]:
     """조항 머리가 2개 이상이면 doc_type과 무관하게 조항 단위, 아니면 고정 길이.
 
     가상 내부 지침처럼 법령이 아닌 문서도 제N조 형식이면 조항 단위가 검색·인용에 낫다.
+    max_chars는 조항 단위에만 쓴다(긴 조항 나누기). 고정 길이 청크는 이미 800자라 그대로다.
     """
+    _check_max_chars(max_chars)
     text, _ = _join_pages(doc)
     if len(ARTICLE_HEADER.findall(text)) >= 2:
-        return chunk_by_article(doc)
+        return chunk_by_article(doc, max_chars)
     return chunk_fixed(doc)
+
+
+def _check_max_chars(max_chars: int | None) -> None:
+    if max_chars is not None and max_chars < MIN_MAX_CHARS:
+        raise ValueError(f"max_chars must be None or >= {MIN_MAX_CHARS}, got {max_chars}")
+
+
+def _split_article(piece: Piece, max_chars: int) -> list[Piece]:
+    """본문 조항 하나를 max_chars 이하의 조각들로. 조각의 위치·article은 원래 조항 그대로다.
+
+    첫 조각은 원문 그대로(조항 머리로 시작한다), 둘째 조각부터는 "머리\n" + 본문이다. 붙인 머리도
+    max_chars에 센다. 경계로 나눈 덩어리를 차례로 이어 붙이다가 넘치면 새 조각을 시작한다.
+    """
+    pos, body, article = piece
+    if article is None or article.startswith(ADDENDA) or len(body) <= max_chars:
+        return [piece]
+    found = ARTICLE_HEAD.match(body)
+    head = found.group() if found else article
+    start = len(head) if found else 0
+    prefix = head + "\n"
+    # 덩어리 하나의 상한. 첫 조각 = 머리 + 원문의 구분 공백(" "나 "\n", 여러 칸일 수 있다) + 덩어리,
+    # 다음 조각 = 머리 + "\n" + 덩어리. 어느 쪽도 max_chars를 넘지 않게 큰 쪽 공백으로 뺀다
+    gap = max(1, _leading_space(body[start:]))
+    units = _units(body, start, len(body), max_chars - len(head) - gap, 0)
+
+    def fits(begin: int, end: int) -> bool:
+        return len(body[begin:end].strip()) + (len(prefix) if begin else 0) <= max_chars
+
+    groups: list[tuple[int, int]] = []
+    begin, end = 0, units[0][1]  # 첫 조각은 머리부터. 첫 덩어리가 늘 함께 들어간다
+    for unit_start, unit_end in units[1:]:
+        if fits(begin, unit_end):
+            end = unit_end
+        else:
+            groups.append((begin, end))
+            begin, end = unit_start, unit_end
+    groups.append((begin, end))
+    return [
+        (pos, prefix + body[b:e].strip() if b else body[b:e].strip(), article) for b, e in groups
+    ]
+
+
+def _units(text: str, lo: int, hi: int, budget: int, level: int) -> list[tuple[int, int]]:
+    """text[lo:hi]를 이어진 덩어리들로 나눈다. 덩어리마다 앞뒤 공백을 뺀 길이가 budget 이하다.
+
+    SPLIT_LEVELS[level]의 경계에서 자르고, 그래도 긴 덩어리만 다음 경계로 더 자른다. 경계가 다
+    떨어지면 글자 수로 자른다(_cut). 공백뿐인 덩어리는 만들지 않는다(뒤 덩어리에 붙는다).
+    """
+    if len(text[lo:hi].strip()) <= budget:
+        return [(lo, hi)]
+    if level == len(SPLIT_LEVELS):
+        return _cut(text, lo, hi, budget)
+    cuts: list[int] = []
+    previous = lo
+    for match in SPLIT_LEVELS[level].finditer(text, lo + 1, hi):
+        if text[previous : match.start()].strip():
+            cuts.append(match.start())
+            previous = match.start()
+    bounds = [lo, *cuts, hi]
+    return [
+        unit
+        for begin, end in zip(bounds[:-1], bounds[1:], strict=True)
+        for unit in _units(text, begin, end, budget, level + 1)
+    ]
+
+
+def _cut(text: str, lo: int, hi: int, budget: int) -> list[tuple[int, int]]:
+    """경계가 없는 긴 구간을 budget 글자 이하로 자른다. 뒤쪽 절반에 공백이 있으면 그 자리에서."""
+    spans: list[tuple[int, int]] = []
+    start = lo
+    while len(text[start:hi].strip()) > budget:
+        begin = start + _leading_space(text[start:hi])
+        end = begin + budget  # text[begin:end]가 budget 글자다. text[end]가 공백이면 낱말 경계
+        cut = next((i + 1 for i in range(end, begin + budget // 2, -1) if text[i].isspace()), end)
+        spans.append((start, cut))
+        start = cut
+    spans.append((start, hi))
+    return spans
 
 
 def _headers(text: str) -> list[tuple[int, str]]:

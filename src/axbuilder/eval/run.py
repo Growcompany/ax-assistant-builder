@@ -271,11 +271,16 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, float]:
 
 
 def load_corpus_chunks(
-    sources_path: Path, raw_dir: Path, repo_root: Path, workspace_id: str
+    sources_path: Path,
+    raw_dir: Path,
+    repo_root: Path,
+    workspace_id: str,
+    max_chars: int | None = None,
 ) -> list[Chunk]:
     """sources.yaml의 문서를 모두 읽어 청크로 나눈다. 하나라도 없으면 FileNotFoundError.
 
     문서가 빠진 채 평가하면 그 문서를 근거로 한 문항이 오류 없이 0점이 되므로 멈춘다.
+    max_chars는 chunk_document에 넘긴다(긴 조항 나누기, None이면 나누지 않는다).
     """
     sources = load_sources(sources_path)
     paths = {s.doc_id: source_file(s, raw_dir, repo_root) for s in sources}
@@ -289,7 +294,7 @@ def load_corpus_chunks(
     chunks: list[Chunk] = []
     for source in sources:
         doc = load_document(paths[source.doc_id], source.doc_meta(), workspace_id)
-        chunks.extend(chunk_document(doc))
+        chunks.extend(chunk_document(doc, max_chars))
     return chunks
 
 
