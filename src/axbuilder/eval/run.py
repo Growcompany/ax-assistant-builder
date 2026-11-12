@@ -2,10 +2,12 @@
 
 사용:
     python -m axbuilder.eval.run --workspace bank --retriever {bm25,dense,hybrid} --k 5 [--with-llm]
-        [--reranker {none,kure-nano,bge-v2-m3}] [--candidates 30]
+        [--reranker {none,kure-nano,bge-v2-m3}] [--candidates 30] [--max-chunk-chars N]
 결과는 reports/{workspace}/{YYYYmmdd-HHMM}-{retriever}.json에 저장하고 마크다운 표로 출력한다.
 --reranker를 주면 검색기의 앞 --candidates개를 리랭커로 다시 줄 세운 뒤 k개를 쓰고, 파일 이름은
 {retriever}+{reranker}-c{candidates}가 된다.
+--max-chunk-chars를 주면 N자보다 긴 본문 조항을 나눠 색인하고(chunk_document의 max_chars), 파일
+이름 끝에 -m{N}을, config에 chunking을 남긴다. 서버 설정 AXB_MAX_CHUNK_CHARS는 보지 않는다.
 원문은 미리 받아 두어야 한다(python scripts/download_corpus.py bank). --with-llm은 AXB_LLM_MODE를
 따른다(기본 local = Ollama). cloud면 문항마다 유료 Claude API를 부르므로 --allow-cloud를 함께
 줘야 한다. 색인은 메모리에만 만든다.
@@ -38,7 +40,7 @@ from axbuilder.eval.metrics import (
 from axbuilder.generation.answer import answer
 from axbuilder.generation.llm import LLMClient, LLMUnavailableError, get_llm
 from axbuilder.generation.refusal import RefusalKind
-from axbuilder.ingest.chunking import chunk_document
+from axbuilder.ingest.chunking import MIN_MAX_CHARS, chunk_document
 from axbuilder.ingest.loaders import load_document
 from axbuilder.models import Answer, Chunk, ScoredChunk
 from axbuilder.retrieval.bm25 import BM25Index
@@ -280,11 +282,16 @@ def summarize(records: list[dict[str, Any]]) -> dict[str, float]:
 
 
 def load_corpus_chunks(
-    sources_path: Path, raw_dir: Path, repo_root: Path, workspace_id: str
+    sources_path: Path,
+    raw_dir: Path,
+    repo_root: Path,
+    workspace_id: str,
+    max_chars: int | None = None,
 ) -> list[Chunk]:
     """sources.yaml의 문서를 모두 읽어 청크로 나눈다. 하나라도 없으면 FileNotFoundError.
 
     문서가 빠진 채 평가하면 그 문서를 근거로 한 문항이 오류 없이 0점이 되므로 멈춘다.
+    max_chars는 chunk_document에 넘긴다(긴 조항 나누기, None이면 나누지 않는다).
     """
     sources = load_sources(sources_path)
     paths = {s.doc_id: source_file(s, raw_dir, repo_root) for s in sources}
@@ -298,7 +305,7 @@ def load_corpus_chunks(
     chunks: list[Chunk] = []
     for source in sources:
         doc = load_document(paths[source.doc_id], source.doc_meta(), workspace_id)
-        chunks.extend(chunk_document(doc))
+        chunks.extend(chunk_document(doc, max_chars))
     return chunks
 
 
@@ -541,6 +548,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help=f"리랭커에 넘기는 후보 수 (기본 {DEFAULT_RERANK_CANDIDATES}, --reranker와 함께만)",
     )
+    parser.add_argument(
+        "--max-chunk-chars",
+        type=int,
+        default=None,
+        help=f"이 글자 수보다 긴 본문 조항을 항·호 경계에서 나눈다 ({MIN_MAX_CHARS} 이상)",
+    )
     parser.add_argument("--corpus-dir", type=Path, default=REPO_ROOT / "corpus")
     parser.add_argument("--reports-dir", type=Path, default=Path("reports"))
     args = parser.parse_args(argv)
@@ -553,6 +566,8 @@ def main(argv: list[str] | None = None) -> int:
     candidates = DEFAULT_RERANK_CANDIDATES if args.candidates is None else args.candidates
     if candidates < 1:
         parser.error("--candidates must be >= 1")
+    if args.max_chunk_chars is not None and args.max_chunk_chars < MIN_MAX_CHARS:
+        parser.error(f"--max-chunk-chars must be >= {MIN_MAX_CHARS}")
 
     started_at = datetime.now()
     started = time.perf_counter()
@@ -591,7 +606,9 @@ def main(argv: list[str] | None = None) -> int:
 
     t0 = time.perf_counter()
     try:
-        chunks = load_corpus_chunks(corpus_dir / "sources.yaml", raw_dir, repo_root, workspace.id)
+        chunks = load_corpus_chunks(
+            corpus_dir / "sources.yaml", raw_dir, repo_root, workspace.id, args.max_chunk_chars
+        )
     except FileNotFoundError as e:
         print(e, file=sys.stderr)
         return 1
@@ -661,6 +678,10 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
         label = f"{args.retriever}+{args.reranker}-c{candidates}"
+    if args.max_chunk_chars is not None:
+        # 리랭커와 같은 규칙: 옵션이 없으면 넣지 않아 보고서·파일 이름이 이전과 같다
+        report.config["chunking"] = {"max_chars": args.max_chunk_chars}
+        label += f"-m{args.max_chunk_chars}"
     # 읽는 순서대로: 준비(읽기·모델·색인·예열) → 평가 → 전체
     report.timing = {
         "load_seconds": load_seconds,
