@@ -16,6 +16,7 @@ from test_run import (
 
 from axbuilder.eval.run import EvalReport, main
 from axbuilder.ingest.chunking import MIN_MAX_CHARS
+from axbuilder.settings import MAX_CHUNK_CHARS_LIMIT
 
 # 제2조(정답 근거)가 300자를 넘는다: --max-chunk-chars 200이면 ①·②가 따로 → 청크 3개
 LONG_GUIDE = (
@@ -76,7 +77,9 @@ def test_max_chunk_chars_with_reranker_goes_after_the_reranker_label(tmp_path, m
     assert report.config["chunking"] == {"max_chars": 250}
 
 
-@pytest.mark.parametrize("bad", ["0", str(MIN_MAX_CHARS - 1), "many"])
+@pytest.mark.parametrize(
+    "bad", ["0", str(MIN_MAX_CHARS - 1), str(MAX_CHUNK_CHARS_LIMIT + 1), "many"]
+)
 def test_bad_max_chunk_chars_is_a_usage_error(tmp_path, monkeypatch, capsys, bad):
     corpus = write_long_corpus(tmp_path)
     monkeypatch.setenv("AXB_DATA_DIR", str(tmp_path / "data"))

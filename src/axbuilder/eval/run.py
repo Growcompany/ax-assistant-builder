@@ -54,7 +54,7 @@ from axbuilder.retrieval.rerank import (
     RerankerUnavailableError,
     RerankRetriever,
 )
-from axbuilder.settings import Settings
+from axbuilder.settings import MAX_CHUNK_CHARS_LIMIT, Settings
 from axbuilder.workspace import Workspace, WorkspaceNotFoundError, WorkspaceStore
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -574,7 +574,10 @@ def main(argv: list[str] | None = None) -> int:
         "--max-chunk-chars",
         type=int,
         default=None,
-        help=f"이 글자 수보다 긴 본문 조항을 항·호 경계에서 나눈다 ({MIN_MAX_CHARS} 이상)",
+        help=(
+            "이 글자 수보다 긴 본문 조항을 항·호·목·줄 경계에서 나눈다 "
+            f"({MIN_MAX_CHARS}~{MAX_CHUNK_CHARS_LIMIT})"
+        ),
     )
     parser.add_argument("--corpus-dir", type=Path, default=REPO_ROOT / "corpus")
     parser.add_argument("--reports-dir", type=Path, default=Path("reports"))
@@ -588,8 +591,11 @@ def main(argv: list[str] | None = None) -> int:
     candidates = DEFAULT_RERANK_CANDIDATES if args.candidates is None else args.candidates
     if candidates < 1:
         parser.error("--candidates must be >= 1")
-    if args.max_chunk_chars is not None and args.max_chunk_chars < MIN_MAX_CHARS:
-        parser.error(f"--max-chunk-chars must be >= {MIN_MAX_CHARS}")
+    if args.max_chunk_chars is not None and not (
+        MIN_MAX_CHARS <= args.max_chunk_chars <= MAX_CHUNK_CHARS_LIMIT
+    ):
+        # 서버 설정(AXB_MAX_CHUNK_CHARS)과 같은 범위
+        parser.error(f"--max-chunk-chars must be {MIN_MAX_CHARS}..{MAX_CHUNK_CHARS_LIMIT}")
 
     started_at = datetime.now()
     started = time.perf_counter()

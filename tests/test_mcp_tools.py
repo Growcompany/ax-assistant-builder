@@ -331,3 +331,15 @@ def test_reranker_unavailable_is_a_readable_mcp_error(prepared):
     finally:
         service.close()
     assert "x/y" in str(error.value) and "AXB_RERANKER" in str(error.value)
+
+
+def test_ask_on_an_index_of_another_chunking_is_a_readable_error(prepared):
+    # 색인은 기본(나누지 않음)으로 만들었다. 분할을 켠 axb mcp는 그 색인으로 답하지 않는다(PR #24)
+    on = prepared.model_copy(update={"max_chunk_chars": 400})
+    service = create_service(on, llm=CiteEverythingLLM(), embedder=HashEmbedder())
+    try:
+        with pytest.raises(ToolError, match="AXB_MAX_CHUNK_CHARS=400") as error:
+            ask_tool(service, "보호 한도?", workspace="bank", role="상담원")
+        assert "다시 색인" in str(error.value)
+    finally:
+        service.close()

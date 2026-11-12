@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 from test_app import WS, RecordingLLM, ask, open_client, upload
+from test_keys_api import bearer, make_key
 
 from axbuilder.settings import Settings
 
@@ -121,3 +122,22 @@ def test_unknown_chunking_in_index_info_is_stale(settings, llm, chunking):
     with open_client(settings, llm) as client:
         assert index_state(client) == {"state": "stale", "chunks": 2}
         assert ask(client).status_code == 409
+
+
+V1_INDEX_NOT_READY = "색인이 준비되지 않았습니다. 이 어시스턴트의 관리자에게 문의하세요"
+
+
+def test_v1_paths_also_refuse_an_index_of_another_chunking(settings, llm):
+    # PR #24 리뷰: 화면·/ask와 같은 색인 열기(loaded_index)를 지나므로 /v1/*도 409다
+    with open_client(settings, llm) as client:
+        build(client)
+        key = make_key(client)["key"]
+    chat = {"model": "bank", "messages": [{"role": "user", "content": "보호 한도?"}]}
+    with open_client(split(settings, 400), llm) as client:
+        for path, body in (("/v1/ask", {"question": "보호 한도?"}), ("/v1/chat/completions", chat)):
+            r = client.post(path, json=body, headers=bearer(key))
+            assert r.status_code == 409, (path, r.text)
+            error = r.json()["error"]
+            assert (error["code"], error["message"]) == ("index_not_ready", V1_INDEX_NOT_READY)
+            # 설정 이름·관리 API 경로는 키로 부르는 쪽(이 PC 밖일 수 있다)에 보내지 않는다
+            assert "AXB_MAX_CHUNK_CHARS" not in r.text and "/workspaces/" not in r.text

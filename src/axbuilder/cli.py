@@ -173,8 +173,9 @@ def _report_chunking(settings: Settings) -> None:
     if settings.max_chunk_chars is None:
         return
     print(
-        f"청크 분할: {settings.max_chunk_chars}자보다 긴 본문 조항을 항·호 경계에서 나눕니다"
-        "(AXB_MAX_CHUNK_CHARS). 다른 설정으로 만든 색인은 다시 색인해야 질문할 수 있습니다"
+        f"청크 분할: {settings.max_chunk_chars}자보다 긴 본문 조항을 항·호·목·줄 경계에서, "
+        "그래도 길면 글자 수로 나눕니다(AXB_MAX_CHUNK_CHARS). "
+        "다른 설정으로 만든 색인은 다시 색인해야 질문할 수 있습니다"
     )
 
 

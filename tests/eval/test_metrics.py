@@ -218,6 +218,29 @@ def test_matches_strict_needs_the_anchor_in_the_chunk_text():
     assert matches_strict(piece2, ev_anchor)
 
 
+UNICODE_SPACED = [
+    "받은\u00a0날부터 2주\u00a0이내에",  # NBSP (원문 HTML의 &nbsp;)
+    "받은\u3000날부터\u30002주\u3000이내에",  # 전각 공백
+    "받은\u2009날부터 2주\u2009이내에",  # 얇은 공백
+    "받은 \u00a0" + NL + "\u3000날부터\t2주" + NL + NL + "\u2009이내에",  # 섞여 있다
+]
+
+
+@pytest.mark.parametrize("spaced", UNICODE_SPACED)
+def test_matches_strict_treats_unicode_spaces_and_newlines_as_one_space(spaced):
+    # PR #24 리뷰: str.split()의 공백(유니코드 공백 포함)을 하나로 맞춘다.
+    # 정규식으로 바꿀 때의 회귀를 막는다
+    in_chunk = text_chunk(
+        "electronic-financial-transactions-act", 11, "제7조(거래내용의 확인)" + NL + spaced, "제7조"
+    )
+    assert matches_strict(in_chunk, ev_anchor)
+    in_anchor = Evidence(
+        doc_id="electronic-financial-transactions-act", article="제7조", anchor=spaced
+    )
+    assert matches_strict(piece2, in_anchor)
+    assert not matches_strict(piece1, in_anchor)
+
+
 def test_matches_strict_without_anchor_is_matches():
     for c in (x1, x2, x3):
         for ev in (ev_x1, ev_x2, ev_x3, ev_missing):

@@ -167,9 +167,12 @@ def test_empty_max_chunk_chars_means_no_split(monkeypatch):
     assert Settings.from_env().max_chunk_chars is None
 
 
-def test_max_chunk_chars_lower_bound_is_what_the_chunker_accepts():
+def test_max_chunk_chars_bounds_are_the_shared_constants():
+    # 하한은 나누기 함수가 받는 값, 상한은 평가 CLI(--max-chunk-chars)와 같은 값
     from axbuilder.ingest.chunking import MIN_MAX_CHARS
+    from axbuilder.settings import MAX_CHUNK_CHARS_LIMIT
 
     field = Settings.model_fields["max_chunk_chars"]
     lower = next(m.ge for m in field.metadata if getattr(m, "ge", None) is not None)
-    assert lower == MIN_MAX_CHARS
+    upper = next(m.le for m in field.metadata if getattr(m, "le", None) is not None)
+    assert (lower, upper) == (MIN_MAX_CHARS, MAX_CHUNK_CHARS_LIMIT) == (200, 20_000)

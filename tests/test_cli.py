@@ -390,7 +390,8 @@ def test_serve_names_a_non_default_chunking(served, monkeypatch, capsys):
     monkeypatch.setenv("AXB_MAX_CHUNK_CHARS", "800")
     assert cli.main(["serve", "--port", str(free_port()), "--no-browser"]) == 0
     assert chunking_lines(capsys.readouterr().out) == [
-        "청크 분할: 800자보다 긴 본문 조항을 항·호 경계에서 나눕니다(AXB_MAX_CHUNK_CHARS). "
+        "청크 분할: 800자보다 긴 본문 조항을 항·호·목·줄 경계에서, 그래도 길면 글자 수로 "
+        "나눕니다(AXB_MAX_CHUNK_CHARS). "
         "다른 설정으로 만든 색인은 다시 색인해야 질문할 수 있습니다"
     ]
 
