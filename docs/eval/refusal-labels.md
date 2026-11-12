@@ -58,6 +58,8 @@ fixture 한 줄: `{run, id, qtype, answer, label, ambiguous}`
 
 ## 주인이 확인할 항목 (애매 7개)
 
+> 2026-11-12 저장소 주인이 이 판단을 에이전트에게 위임했다. 아래 7개 라벨은 에이전트가 단 그대로 두었다. 사람 검수가 아니다.
+
 골든셋 쪽 확인 목록은 [`golden-v0-owner-check.md`](golden-v0-owner-check.md)에 있고, 그 목록의 맨 위에서 이 절을 가리킨다. 원문 전체는 fixture에서 `run`과 `id`로 찾는다.
 
 `ambiguous: true`로 표시했다. 판정기 평가에 영향이 있는지도 함께 적는다.
