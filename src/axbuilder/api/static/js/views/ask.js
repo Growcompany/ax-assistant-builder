@@ -10,7 +10,7 @@ import { conversation, currentRole, documentOf, setRole, state } from "../state.
 import { MAX_QUESTION_CHARS, RULES, charCount } from "../validate.js";
 import { citationLabel, showEvidence } from "./evidence.js";
 
-// README "데모"의 질문 4개. 같은 질문을 역할만 바꿔 묻는 쌍이 들어 있다.
+// 화면에 보여 줄 예시 질문 4개. 같은 질문을 역할만 바꿔 묻는 쌍이 들어 있다.
 const DEMO_EXAMPLES = [
   { role: "상담원", question: "AXB 든든 정기예금에 12개월 만기일시지급식으로 가입하면 기본금리는 몇 %인가요?" },
   { role: "상담원", question: "고령 고객의 대리인이 예금을 찾으려면 어떤 서류가 필요한가요?" },
