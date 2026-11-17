@@ -1,10 +1,10 @@
 # 채용 담당자가 보는 RAG 포트폴리오와 AI 도구 활용 기록 방법 (2026)
 
-(2026-11-09 조사 · 조사 에이전트 작성 · 표기: [확인] 원문을 직접 열어 확인 / [검색] 검색 결과 요약만 확인 / [추정] 해석. 결정에 반영한 내용은 `00-summary.md` 6절과 M-1 계획의 '변경 기록' 참고)
+2026-11-09에 조사 에이전트가 작성한 조사 노트입니다. [확인]은 원문을 직접 열어 확인한 내용, [검색]은 검색 결과 요약만 확인한 내용, [추정]은 해석입니다. 이 가운데 결정에 반영한 내용은 `00-summary.md` 6절과 M-1 계획의 '변경 기록'에 있습니다.
 
 ## 요약
 
-- **평가가 가장 잘 드러나는 신호입니다.** 확인한 좋은 RAG 저장소와 채용 쪽 글이 공통으로 요구하는 것은 네 가지입니다. 평가셋과 지표 정의, 결과 표, 실패·한계 공개, 그리고 각 설계 결정의 한 줄 이유입니다. [확인] https://www.techinterview.org/post/3233475399/ai-portfolio-built-with-ai-2026-interviews/ · https://github.com/UrBaneee/rag-framework
+- **평가가 가장 잘 드러나는 신호입니다.** 확인한 좋은 RAG 저장소와 채용 쪽 글은 공통으로 평가셋과 지표 정의, 결과 표, 실패·한계 공개, 설계 결정마다 붙인 한 줄 이유를 요구합니다. [확인] https://www.techinterview.org/post/3233475399/ai-portfolio-built-with-ai-2026-interviews/ · https://github.com/UrBaneee/rag-framework
 - **잘 알려진 오픈소스 RAG 저장소에도 평가 수치가 없는 경우가 많습니다.** kotaemon과 AutoRAG README가 그렇습니다. 그래서 개인 포트폴리오가 평가 표, 지연 비용, 효과가 없었던 결과까지 보여주면 오히려 눈에 띕니다. [확인] https://github.com/Cinnamon/kotaemon · https://github.com/Marker-Inc-Korea/AutoRAG · [추정]
 - **2026년 국내 공채는 결과물보다 AI 협업 과정을 평가하는 쪽으로 바뀌었습니다.**
   - CJ올리브네트웍스는 코딩테스트를 전면 개편해 바이브 코딩 테스트로 바꿨습니다. [확인] https://cjnews.cj.net/?p=80060
@@ -12,8 +12,8 @@
   - 그렙이 공급하는 시중은행 평가는 프롬프트 기록을 분석합니다. [확인] https://ditoday.com/?p=154678
 - **저장소도 그 평가 형식에 맞춰 남기면 됩니다.** AI 사용 기록, ADR(의사결정 기록), 검증 증거(실행 명령과 출력), 학습 노트를 남기면 "AI로 만들었다"가 감점이 아니라 평가 항목에 대한 증거가 됩니다. [추정, 근거: 위 기사들 + https://code.claude.com/docs/en/best-practices]
 - **은행은 AI 역량만 보지 않고 금융 업무 이해도를 함께 봅니다.** [확인] https://economist.co.kr/article/view/ecn202609220047
-  - 그래서 면접 대비는 RAG 기술 질문(청킹, 하이브리드, 평가, 환각, 비용·지연)에 도메인 질문을 더해야 합니다. 도메인 질문은 조문 인용, 개정 시행일, 내규와 법령 충돌, 망분리와 로컬 LLM 같은 것입니다. [추정]
-- **이 조사에서 쓴 자료의 품질에 대한 주의:** 검색에 나온 "2026 AI 포트폴리오 가이드"류 블로그(pages.dev 등)는 근거가 확인되지 않는 것이 많아 거의 쓰지 않았습니다. [추정]
+  - 그래서 면접은 RAG 기술 질문(청킹, 하이브리드, 평가, 환각, 비용·지연)에 도메인 질문까지 더해 준비해야 합니다. 도메인 질문은 조문 인용, 개정 시행일, 내규와 법령 충돌, 망분리와 로컬 LLM 같은 것입니다. [추정]
+- **이 조사에서는 근거가 약한 블로그를 거의 쓰지 않았습니다.** 검색에 나온 "2026 AI 포트폴리오 가이드"류 블로그(pages.dev 등)는 근거를 확인할 수 없는 글이 많았습니다. [추정]
 
 ---
 
@@ -24,14 +24,14 @@
 | # | 사례 | 배울 점 | 약점 / 주의 | 태그 |
 |---|---|---|---|---|
 | 1 | **UrBaneee/rag-framework** (개인 RAG 저장소) | 섹션 순서가 "만든 이유 → 아키텍처 → 결과 요약 → 설치 → 평가 결과 → 알려진 한계"입니다. Mermaid로 ingest와 query 파이프라인을 그렸습니다(BM25+FAISS → RRF → 리랭커 → 인용 답변). 하이브리드는 Recall@5 +6.6pt를 얻는 대신 쿼리 지연이 12배라는 비용을 같이 적었습니다. LLM 메타데이터 보강은 +0.0pt였다는 null result(효과 없음)도 공개합니다. 30문항을 사람이 직접 라벨링한 평가셋을 쓰고, 정답이 순환적으로 정해진 평가셋은 따로 표시했습니다. 한계 섹션에는 "수치는 방향성으로 읽을 것", "구현했지만 벤치마크하지 않음"이라고 적었습니다. | 데모 GIF가 없습니다 | [확인] https://github.com/UrBaneee/rag-framework |
-| 2 | **techinterview.org, "The AI Portfolio: What 'Built With AI' Means in 2026 Interviews"** (2026-05-06, 2026-07-12 갱신) | README 레시피를 제시합니다. 문제와 그 비용, AI가 맞는 도구인 이유(비AI 대안과 비교), 설계 결정마다 한 줄 이유, 대략적인 수치를 붙인 트레이드오프(토큰, 지연, 품질이 깨진 지점), 평가셋과 지표를 점수보다 먼저 설명, 실패 유형과 수정, 다음 단계. 손으로 고른 20개 예제(고른 이유 포함)로도 의미가 있다고 봅니다. 면접관은 지원자가 어렵다고 주장한 부분을 파고든다고 합니다. | 업계 블로그라 설문 같은 데이터는 없습니다 | [확인] https://www.techinterview.org/post/3233475399/ai-portfolio-built-with-ai-2026-interviews/ |
-| 3 | **allganize/RAG-Evaluation-Dataset-KO** (국내, 2024) | 한국어 5개 도메인(금융 포함)에 도메인당 60문항, 총 300문항입니다. 결과 셀을 "0.85 (51/60)"처럼 분모까지 적었습니다. 자동 평가자 4개의 투표로 채점하고, 금융 도메인에서 사람과 약 8% 불일치한다는 수치를 공개합니다. LLM 채점의 신뢰도를 보고하는 방식으로 참고할 만합니다. | 2024년 자료이고 마지막 갱신은 2024-08-09입니다 | [확인] https://huggingface.co/datasets/allganize/RAG-Evaluation-Dataset-KO |
+| 2 | **techinterview.org, "The AI Portfolio: What 'Built With AI' Means in 2026 Interviews"** (2026-05-06, 2026-07-12 갱신) | README 레시피를 제시합니다. 항목은 문제와 그 비용, AI가 맞는 도구인 이유(비AI 대안과 비교), 설계 결정마다 한 줄 이유, 대략적인 수치를 붙인 트레이드오프(토큰, 지연, 품질이 깨진 지점), 점수보다 먼저 설명하는 평가셋과 지표, 실패 유형과 수정, 다음 단계입니다. 손으로 고른 20개 예제(고른 이유 포함)로도 의미가 있다고 봅니다. 면접관은 지원자가 어렵다고 주장한 부분을 파고든다고 합니다. | 업계 블로그라 설문 같은 데이터는 없습니다 | [확인] https://www.techinterview.org/post/3233475399/ai-portfolio-built-with-ai-2026-interviews/ |
+| 3 | **allganize/RAG-Evaluation-Dataset-KO** (국내, 2024) | 한국어 5개 도메인(금융 포함)을 다룹니다. 도메인당 60문항씩 총 300문항입니다. 결과 셀을 "0.85 (51/60)"처럼 분모까지 적었습니다. 자동 평가자 4개의 투표로 채점하고, 금융 도메인에서 사람과 약 8% 불일치한다는 수치를 공개합니다. LLM 채점의 신뢰도를 보고하는 방식으로 참고할 만합니다. | 2024년 자료이고 마지막 갱신은 2024-08-09입니다 | [확인] https://huggingface.co/datasets/allganize/RAG-Evaluation-Dataset-KO |
 | 4 | **Anthropic, "Introducing Contextual Retrieval"** (2024-09-19) | 실험 보고 형식의 본보기입니다. 지표를 먼저 정의하고(1−recall@20, 베이스라인 실패율 5.7%), 단계별로 결과를 보여줍니다. Contextual Embeddings는 실패를 35% 줄였고, Contextual BM25를 더하면 49%, 리랭킹까지 더하면 67% 줄었습니다. "임베딩만 쓰지 않고 BM25를 섞는 이유"에 대한 근거로도 쓸 수 있습니다. | 영문 데이터 기준이고 2024년 자료입니다 | [확인] https://www.anthropic.com/news/contextual-retrieval |
 | 5 | **Cinnamon/kotaemon** (대조 사례) | 소개를 최종 사용자용과 개발자용으로 나눴습니다. Docker 실행을 권장 경로로 두고, 로컬 모델 설정 섹션을 따로 만들었습니다. | 정적 PNG만 있고 애니메이션 데모가 없습니다. 아키텍처 다이어그램도 평가 섹션도 없습니다 | [확인] https://github.com/Cinnamon/kotaemon |
 
 보조 자료:
 - **Marker-Inc-Korea/AutoRAG** (국내, 대조 사례): 독자별 진입점, 증상→해결 트러블슈팅 표, 프라이버시 섹션이 좋습니다. 반면 README가 매우 길고 성능 주장을 뒷받침하는 평가 수치가 없습니다. 현재 README는 원래 Python AutoRAG를 `legacy/`로 옮긴 형태로 크게 바뀌었으니, 인용할 때는 접근일을 적는 것이 좋습니다. [확인] https://github.com/Marker-Inc-Korea/AutoRAG
-- **위키독스 Kiwi 하이브리드 실측 글** (국내, 2026-08): 사람이 만든 12문항으로 Recall@10을 쟀습니다. 키워드 0.542, 의미 0.624, 하이브리드 0.837입니다. 평가셋을 바꾸면 결론이 뒤집힐 수 있다고 직접 밝혔고, 조사가 붙어 키워드 검색이 실패하는 문제를 Kiwi로 해결하는 사례도 있습니다. 이 프로젝트와 스택이 거의 같습니다. [검색] https://wikidocs.net/389782 (403으로 직접 열람은 실패)
+- **위키독스 Kiwi 하이브리드 실측 글** (국내, 2026-08): 사람이 만든 12문항으로 Recall@10을 측정했습니다. 결과는 키워드 0.542, 의미 0.624, 하이브리드 0.837입니다. 평가셋을 바꾸면 결론이 뒤집힐 수 있다고 직접 밝혔고, 조사가 붙어 키워드 검색이 실패하는 문제를 Kiwi로 해결하는 사례도 있습니다. 이 프로젝트와 스택이 거의 같습니다. [검색] https://wikidocs.net/389782 (403으로 직접 열람은 실패)
 - **반례 (면접 대비용):** 법률 데이터에서는 BM25를 더해도 문서 내부 정밀도와 재현율이 떨어질 수 있다는 연구가 있습니다. [검색] https://arxiv.org/pdf/2510.06999
 
 ### 사례에서 뽑은 README 필수 요소
@@ -68,7 +68,7 @@
 
 | 주제 | 예상 질문 | 이 저장소에서 보여줄 증거 |
 |---|---|---|
-| 청킹 | 왜 그 단위로 잘랐나? 크기와 오버랩은 어떻게 정했나? 표와 별표는 어떻게 처리했나? | 조·항·호 구조 단위 청킹과 고정 길이 청킹의 Recall@k 비교 표. 청크 크기를 바꿔가며 잰 결과. 표가 들어간 문서의 실패 사례. 비교 근거: rag-framework는 512토큰 부근에서 효과가 평탄해졌습니다 [확인] https://github.com/UrBaneee/rag-framework |
+| 청킹 | 왜 그 단위로 잘랐나? 크기와 오버랩은 어떻게 정했나? 표와 별표는 어떻게 처리했나? | 조·항·호 구조 단위 청킹과 고정 길이 청킹의 Recall@k 비교 표. 청크 크기를 바꿔 가며 측정한 결과. 표가 들어간 문서의 실패 사례. 비교 근거: rag-framework는 512토큰 부근에서 효과가 평탄해졌습니다 [확인] https://github.com/UrBaneee/rag-framework |
 | 하이브리드 근거 | 임베딩만 쓰면 왜 안 되나? 왜 가중합이 아니라 RRF인가? k=60은 왜인가? | 조문 번호, 금리 같은 숫자, 상품명 질의에서 BM25가 이기는 사례. BM25 / dense / RRF 3열 비교 표. BM25가 식별자와 정확 일치에 강하다는 근거 [확인] https://www.anthropic.com/news/contextual-retrieval. RRF k=60이 흔한 기본값이라는 점 [검색] https://techsy.io/ko/blog/hybrid-search-bm25-vs-vector-rrf. 하이브리드가 지지 않는 경우도 기록 [검색] https://arxiv.org/pdf/2510.06999 |
 | 한국어 BM25 | 왜 형태소 분석이 필요한가? 품사 필터는 어떻게 했나? | 공백 토큰화와 Kiwi 토큰화 비교. 조사 때문에 검색이 실패한 사례 [검색] https://wikidocs.net/389782 |
 | 평가 방법 | 평가셋은 어떻게 만들었고, 몇 개이며, 누가 라벨링했나? 검색과 생성은 어떻게 나눠 평가했나? LLM 채점은 믿을 수 있나? | 질문 유형별 평가셋(JSONL), 정답 근거 청크 ID, Recall@k·MRR·nDCG. 생성 쪽은 정답성·근거 충실도·인용 정확도·거절. LLM 채점과 사람 채점의 일치율(allganize처럼 불일치율 공개) [확인] https://huggingface.co/datasets/allganize/RAG-Evaluation-Dataset-KO. faithfulness는 컨텍스트와의 일관성만 본다는 한계 [검색] https://docs.ragas.io/en/v0.1.21/references/metrics.html |
@@ -96,21 +96,21 @@
 | 배경 | 대한상의 조사에서 인사담당자의 69.2%가 채용 시 AI 역량을 고려한다고 답함 | — | [확인] 기사 재인용, 원 조사는 미확인: https://www.dailian.co.kr/news/view/1684386 |
 
 - **용어를 구분해야 합니다.** 은행 공고의 "AI역량검사"(게임형·성향형)는 위 "AI 활용 역량평가"와 다른 종류일 수 있습니다. [검색] https://wikidocs.net/blog/@openwiki/24381/ · [추정]
-- **해외 기준(Anthropic, 2025-07-10 갱신):** 지원서 초안은 본인이 쓰고 Claude로 다듬는 것은 허용합니다. 하지 않은 경험을 만들어내는 것은 금지합니다. 별도 허용이 없으면 과제와 라이브 면접에서는 AI를 쓸 수 없고, AI 사용은 투명하게 밝히도록 요구합니다. 그러니 면접에서는 AI 없이 직접 설명할 수 있어야 합니다. [확인] https://www.anthropic.com/candidate-ai-guidance
+- **해외 기준(Anthropic, 2025-07-10 갱신):** 지원서 초안을 본인이 쓰고 Claude로 다듬는 것은 허용합니다. 하지 않은 경험을 만들어내는 것은 금지합니다. 별도 허용이 없으면 과제와 라이브 면접에서는 AI를 쓸 수 없고, AI 사용은 투명하게 밝히도록 요구합니다. 그러니 면접에서는 AI 없이 직접 설명할 수 있어야 합니다. [확인] https://www.anthropic.com/candidate-ai-guidance
 
 ### AI 협업 기록이 감점이 아니라 강점이 되는 이유
 
-- **"거의 맞는" 출력이 개발자들의 가장 큰 불만입니다.** Stack Overflow 2025 조사에서 84%가 AI를 쓰거나 쓸 계획이지만, 46%는 정확도를 불신하고, 66%가 "거의 맞지만 틀린" 출력을 가장 큰 불만으로 꼽았습니다. 그래서 검증 기록이 차별점이 됩니다. [확인] https://survey.stackoverflow.co/2025/ai
+- **"거의 맞는" 출력이 개발자들의 가장 큰 불만입니다.** Stack Overflow 2025 조사에서 84%가 AI를 쓰거나 쓸 계획이라고 답했습니다. 하지만 46%는 정확도를 불신하고, 66%는 "거의 맞지만 틀린" 출력을 가장 큰 불만으로 꼽았습니다. 그래서 검증 기록이 차별점이 됩니다. [확인] https://survey.stackoverflow.co/2025/ai
 - **체감과 실측은 다를 수 있습니다.** METR RCT(2025)에서 숙련 개발자는 AI를 쓸 때 19% 더 느렸지만 스스로는 20% 빨라졌다고 믿었습니다. 체감이 아니라 측정으로 말해야 한다는 근거입니다. [검색] https://www.infoworld.com/article/4020931/ai-coding-tools-can-slow-down-seasoned-developers-by-19.html
-- **Claude Code 공식 문서도 같은 방향입니다.** 문서가 권하는 것은 세 가지입니다. 통과/실패를 반환하는 검사를 제공할 것, 실행한 명령과 출력이라는 증거를 요구할 것, 코드를 작성하지 않은 독립 리뷰어(`/code-review`, 읽기 전용 서브에이전트)를 쓸 것. 또 리뷰 지적을 전부 반영하면 과잉 추상화가 생긴다고 경고합니다. [확인] https://code.claude.com/docs/en/best-practices
+- **Claude Code 공식 문서도 같은 방향입니다.** 문서는 통과/실패를 반환하는 검사를 제공하고, 실행한 명령과 출력을 증거로 요구하고, 코드를 작성하지 않은 독립 리뷰어(`/code-review`, 읽기 전용 서브에이전트)를 쓰라고 권합니다. 또 리뷰 지적을 전부 반영하면 과잉 추상화가 생긴다고 경고합니다. [확인] https://code.claude.com/docs/en/best-practices
 - **오픈소스 쪽 관행도 있습니다.** Ghostty는 PR에 AI 사용을 고지하게 하고, 사람이 검증하는 것을 필수로 둡니다. [검색] https://www.mintlify.com/ghostty-org/ghostty/guides/contributing
 
 ### 남길 기록 5종 (크래프톤 Cofa-Probe 수집 항목에 맞춤) [추정, 근거: 위 표]
 
-1. **`docs/ai-usage.md`** (AI 사용 고지와 분담표): 작업 | AI가 한 것 | 내가 결정·검증한 것 | 검증 증거 링크 | 거절하거나 수정한 AI 제안.
-   - 맨 아래 "거절하거나 수정한 제안" 열이 가장 강한 증거가 됩니다. HD현대가 보는 "비판적 분석과 재구성"이 바로 이것입니다.
+1. **`docs/ai-usage.md`** (AI 사용 고지와 분담표): 열은 작업 | AI가 한 것 | 내가 결정·검증한 것 | 검증 증거 링크 | 거절하거나 수정한 AI 제안으로 둡니다.
+   - 마지막 "거절하거나 수정한 제안" 열이 가장 강한 증거가 됩니다. HD현대가 보는 "비판적 분석과 재구성"이 바로 이것입니다.
 2. **`docs/adr/NNNN-*.md`** (ADR): Nygard(2011)식 Context / Decision / Consequences에 "고려한 대안"과 "근거 실험 링크"를 더합니다. ADR은 결정 하나와 그 근거·트레이드오프·결과를 기록하고, ADR을 모은 것이 decision log가 됩니다. [확인] https://adr.github.io/
-3. **실험 일지 `eval/runs/`**: 날짜, 커밋 해시, 설정(청크 크기, k, 모델 태그), 지표, 한 줄 해석. 효과가 없었던 결과(null result)도 그대로 남깁니다. [확인] 방식 참고: https://github.com/UrBaneee/rag-framework
+3. **실험 일지 `eval/runs/`**: 날짜, 커밋 해시, 설정(청크 크기, k, 모델 태그), 지표, 한 줄 해석을 적습니다. 효과가 없었던 결과(null result)도 그대로 남깁니다. [확인] 방식 참고: https://github.com/UrBaneee/rag-framework
 4. **검증 증거**: 테스트, `make eval`의 출력 로그, 독립 리뷰 결과를 PR이나 커밋에 붙입니다. 커밋 트레일러(`Co-Authored-By`)로 AI 기여를 표시해 두면 투명성 근거가 됩니다. [추정, 근거: https://code.claude.com/docs/en/best-practices]
 5. **`docs/learning-notes/`**: 개념을 자기 말로 정리하고 손으로 계산한 예를 둡니다(BM25 점수, RRF 순위 합산, nDCG 계산). 면접에서 AI 없이 설명할 수 있다는 증거가 됩니다. [추정, 근거: https://www.anthropic.com/candidate-ai-guidance]
 
@@ -139,9 +139,9 @@ ADR 최소 템플릿 [추정]:
 - **감점 패턴:**
   - "GPT를 썼다"처럼 모호한 서술
   - 근거 없는 성능 주장
-  - 데모만 화려하고 견고성이 없음
+  - 데모만 화려하고 견고성은 없는 결과물
   - 직접 설명하지 못하는 코드 [확인] https://www.techinterview.org/post/3233475399/ai-portfolio-built-with-ai-2026-interviews/
-  - 해보지 않은 경험을 서술하는 것 [확인] https://www.anthropic.com/candidate-ai-guidance
+  - 해보지 않은 경험에 대한 서술 [확인] https://www.anthropic.com/candidate-ai-guidance
 
 ---
 

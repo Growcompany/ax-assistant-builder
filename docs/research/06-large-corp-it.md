@@ -2,7 +2,7 @@
 
 [확인] 공고 원문·보도자료 · [추정] 후기·정황 · [마감 YYYY-MM] 참고용
 
-> 오늘 기준 **접수 중인 대기업 신입 AI 공고는 없음**. 2025 하반기~2026 하반기 공채 모두 마감. 열려 있는 건 SK AX 경력직뿐. → 다음 공채(2027 상반기, 보통 3~4월)를 겨냥해 준비.
+> 오늘 기준으로 **접수 중인 대기업 신입 AI 공고는 없습니다**. 2025 하반기~2026 하반기 공채는 모두 마감됐고, 열려 있는 것은 SK AX 경력직뿐입니다. 다음 공채(2027 상반기, 보통 3~4월)를 겨냥해 준비합니다.
 
 ## 1. 회사별
 
@@ -24,12 +24,12 @@
 
 출처: linkareer.com/activity/348877 · lg.co.kr/media/release/30555 · m.catch.co.kr/NCS/RecruitInfoDetails/574679 · byline.network/2026/05/7-433 · linkareer.com/activity/347063 · linkareer.com/activity/347021 · cjnews.cj.net (2026-09-17) · cse.snu.ac.kr/en/community/notice/25544 · jasoseol.com/recruit/105959
 
-## 2. 학사로 대기업 AX 직무 가능한가
+## 2. 학사로 대기업 AX 직무에 지원할 수 있나요?
 
-- **지원 자격은 대부분 열려 있음** [확인]: LG CNS AI, 롯데이노베이트 AI 서비스·Platform, 현대오토에버 AI 플랫폼·Data, CJ AI 엔지니어, HD현대 일반 AI/AX, 두산 AI.
-- **석사↑는 연구형·모델 개발형만** [확인]: 포스코DX AI, HD 조선해양 연구직, LG유플러스 AI.
-- **학사 진입 직무명** [추정]: "AI 서비스 엔지니어", "AI Platform/MLOps", "Service Engineer(AI 플랫폼)", "Data Engineer", 사업부형 "AI/AX 엔지니어", "DX/SW 엔지니어" → 공통점은 **모델 연구가 아니라 LLM 응용·서비스·플랫폼 구축/운영**.
-- **우회 경로** [확인]: **SKALA**(학력무관, 수료 후 SK AX 채용 연계), Samsung Convergence SW Academy. 삼성SDS는 '소프트웨어' 직군 입사 후 AI 조직 배치 구조 [추정].
+- **지원 자격은 대부분 열려 있음** [확인]: LG CNS AI, 롯데이노베이트 AI 서비스·Platform, 현대오토에버 AI 플랫폼·Data, CJ AI 엔지니어, HD현대 일반 AI/AX, 두산 AI가 그렇습니다.
+- **석사↑는 연구형·모델 개발형만** [확인]: 포스코DX AI, HD 조선해양 연구직, LG유플러스 AI가 여기에 해당합니다.
+- **학사 진입 직무명** [추정]: "AI 서비스 엔지니어", "AI Platform/MLOps", "Service Engineer(AI 플랫폼)", "Data Engineer", 사업부형 "AI/AX 엔지니어", "DX/SW 엔지니어"가 있습니다. 공통점은 **모델 연구가 아니라 LLM 응용·서비스·플랫폼 구축/운영**이라는 점입니다.
+- **우회 경로** [확인]: **SKALA**(학력무관, 수료 후 SK AX 채용 연계)와 Samsung Convergence SW Academy가 있습니다. 삼성SDS는 '소프트웨어' 직군으로 입사한 뒤 AI 조직에 배치되는 구조로 보입니다 [추정].
 
 ## 3. 공통으로 보는 것 Top 5
 
