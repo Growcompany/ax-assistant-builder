@@ -219,6 +219,7 @@ print(reply.choices[0].message.content)
 ## 구조
 
 ```mermaid
+%%{init: {"flowchart": {"htmlLabels": false}}}%%
 flowchart TD
     subgraph INDEX["문서를 올릴 때"]
         DOC["회사 문서<br/>PDF · HWPX · TXT · MD"] --> CHUNK["조항 단위로 나누기"]
