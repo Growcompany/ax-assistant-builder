@@ -1,30 +1,30 @@
 # 가상 은행 예시 자료 — 다운로드 경로·형식·저작권
 
-(2026-11-09 조사 · 조사 에이전트 작성 · 표기: [확인] 원문을 직접 열어 확인 / [검색] 검색 결과 요약만 확인 / [추정] 해석. 결정에 반영한 내용은 `00-summary.md` 6절과 M-1 계획의 '변경 기록' 참고)
+2026-11-09에 조사 에이전트가 작성한 조사 노트입니다. [확인]은 원문을 직접 열어 확인한 내용, [검색]은 검색 결과 요약만 확인한 내용, [추정]은 해석입니다. 이 가운데 결정에 반영한 내용은 `00-summary.md` 6절과 M-1 계획의 '변경 기록'에 있습니다.
 
 ## 요약
 
-- **법령 3종(은행법·금소법·전자금융거래법)은 API 키 없이 받을 수 있다.** 국가법령정보센터 화면 JS가 쓰는 내부 엔드포인트에 POST로 요청하면 PDF/HWP/HWPX/DOC가 `Content-Disposition: attachment`로 내려온다. 은행법은 4개 형식을 모두 응답 헤더로 확인했다. 금소법·전자금융거래법은 PDF만 확인했다. 은행법 PDF는 메모리에서 세어 보니 35쪽(234,994B)이다. 본문 HTML은 `lsInfoR.do`에 GET으로 받는다. `curl -I`(HEAD)는 404를 돌려주므로 스크립트는 GET/POST를 써야 한다. [확인] https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=282001
-- **전자금융감독규정(금융위원회고시 제2026-29호)**: 전문 HTML은 `admRulInfoR.do`에 GET으로 받을 수 있다(조문 헤더 103개). PDF 엔드포인트는 조문 선택 파라미터 없이 부르면 1쪽만 나온다. 첨부 원문 PDF(`flDownload.do?flSeq=167118077`, 24쪽)도 받을 수 있지만 전문인지 개정문인지는 확인하지 못했다. [확인/미확인]
-- **공정위 표준약관 2종**: 공정위 표준약관 게시판에서 키 없이 직접 다운로드된다. **형식은 HWPX만** 있고, 최신판은 '24.9.27. 개정본이다. 응답 첫 바이트가 `PK`로 시작해 HWPX(zip)임을 확인했다. [확인] https://www.ftc.go.kr/www/selectBbsNttList.do?bordCd=201&key=202
+- **법령 3종(은행법·금소법·전자금융거래법)은 API 키 없이 받을 수 있습니다.** 국가법령정보센터 화면 JS가 쓰는 내부 엔드포인트에 POST로 요청하면 PDF/HWP/HWPX/DOC가 `Content-Disposition: attachment`로 내려옵니다. 은행법은 4개 형식을 모두 응답 헤더로 확인했고, 금소법·전자금융거래법은 PDF만 확인했습니다. 은행법 PDF는 메모리에서 쪽수를 세어 보니 35쪽(234,994B)입니다. 본문 HTML은 `lsInfoR.do`에 GET으로 요청해 받습니다. `curl -I`(HEAD)는 404를 돌려주므로 스크립트에서는 GET이나 POST를 써야 합니다. [확인] https://www.law.go.kr/LSW/lsInfoP.do?lsiSeq=282001
+- **전자금융감독규정(금융위원회고시 제2026-29호)**: 전문 HTML은 `admRulInfoR.do`에 GET으로 요청해 받을 수 있고, 조문 헤더는 103개입니다. PDF 엔드포인트는 조문 선택 파라미터 없이 부르면 1쪽만 나옵니다. 첨부 원문 PDF(`flDownload.do?flSeq=167118077`, 24쪽)도 받을 수 있지만, 전문인지 개정문인지는 확인하지 못했습니다. [확인/미확인]
+- **공정위 표준약관 2종**: 공정위 표준약관 게시판에서 키 없이 바로 내려받을 수 있습니다. **형식은 HWPX만** 있고, 최신판은 '24.9.27. 개정본입니다. 응답 첫 바이트가 `PK`로 시작하는 것으로 HWPX(zip)임을 확인했습니다. [확인] https://www.ftc.go.kr/www/selectBbsNttList.do?bordCd=201&key=202
 - **OpenAPI**
-  - 법제처 DRF: `OC`가 필요하다. `OC=test`로 부르면 "사용자 정보 검증에 실패"가 돌아온다. 승인에는 1~2일이 걸린다. [확인]
-  - finlife: 개인 키는 신청 즉시 발급되고 하루 10,000건까지 조회된다. 다만 이용약관에 **"정보를 복제 또는 저장하거나 전송할 수 없습니다"** 조항이 있다. [확인]
+  - 법제처 DRF: `OC`가 필요합니다. `OC=test`로 부르면 "사용자 정보 검증에 실패"라는 응답이 돌아옵니다. 승인에는 1~2일이 걸립니다. [확인]
+  - finlife: 개인 키는 신청 즉시 발급되고 하루 10,000건까지 조회할 수 있습니다. 다만 이용약관에 **"정보를 복제 또는 저장하거나 전송할 수 없습니다"** 조항이 있습니다. [확인]
 - **저작권 판단**
-  - 법령·고시: 저작권법 제7조 제1·2호에 따라 보호받지 않는다. 법제처도 영리 목적을 포함한 자유 이용을 허용한다(출처 표기 필수). → 공개 저장소에 커밋해도 된다.
-  - 표준약관: 회색지대다. → 다운로드 스크립트로 받는 쪽을 권장한다.
-  - 은행 상품설명서: 은행의 업무상저작물이다. → 커밋 금지. 링크와 스크립트만 두고, 데모용은 가상 설명서를 직접 쓰는 것을 권장한다.
-  - 현행 저작권법(시행 2026.10.29.)에는 TDM(정보분석) 면책 조항이 없다. [확인/추정]
+  - 법령·고시: 저작권법 제7조 제1·2호에 따라 보호받지 않습니다. 법제처도 영리 목적을 포함한 자유 이용을 허용하며, 출처 표기는 필수입니다. 따라서 공개 저장소에 커밋해도 됩니다.
+  - 표준약관: 회색지대입니다. 그래서 다운로드 스크립트로 받는 쪽을 권장합니다.
+  - 은행 상품설명서: 은행의 업무상저작물입니다. 따라서 커밋하면 안 됩니다. 링크와 스크립트만 두고, 데모용 설명서는 가상으로 직접 쓰는 것을 권장합니다.
+  - 현행 저작권법(시행 2026.10.29.)에는 TDM(정보분석) 면책 조항이 없습니다. [확인/추정]
 - **평가 데이터셋**
-  - `allganize/RAG-Evaluation-Dataset-KO`: MIT, 300문항(도메인당 60), 원문 PDF는 저장소에 없고 출처 URL만 있다. [확인]
-  - 보조 후보: `mteb/AutoRAGRetrieval`(MIT), `lbox/kbl`·`lbox/kcl`(CC BY-NC 4.0), `BCCard/BCAI-Finance-Kor-Embedding-Triplet`(CC BY 4.0), KorFinVDR(어노테이션 CC BY 4.0).
-  - AI Hub 금융·법률 MRC는 제3자 제공을 금지한다. HF에 올라온 재업로드본은 쓰지 않는 것을 권장한다.
+  - `allganize/RAG-Evaluation-Dataset-KO`: MIT 라이선스이고 300문항(도메인당 60)입니다. 원문 PDF는 저장소에 없고 출처 URL만 있습니다. [확인]
+  - 보조 후보는 `mteb/AutoRAGRetrieval`(MIT), `lbox/kbl`·`lbox/kcl`(CC BY-NC 4.0), `BCCard/BCAI-Finance-Kor-Embedding-Triplet`(CC BY 4.0), KorFinVDR(어노테이션 CC BY 4.0)입니다.
+  - AI Hub 금융·법률 MRC는 제3자 제공을 금지합니다. HF에 올라온 재업로드본은 쓰지 않는 것을 권장합니다.
 
 ---
 
 ## 문서별 소스 표
 
-(작업 방식: 응답 헤더와 첫 바이트, PDF 쪽수만 메모리에서 확인했고 파일은 저장하지 않았다.)
+응답 헤더와 첫 바이트, PDF 쪽수만 메모리에서 확인했고 파일은 저장하지 않았습니다.
 
 | doc_id 제안 | 제목 (현행 버전) | 유형 | 기본 URL | 형식 | 키 | 라이선스 | 확인 상태 |
 |---|---|---|---|---|---|---|---|
@@ -44,7 +44,7 @@
 
 ### 다운로드 레시피 (키 불필요, 비공식 내부 엔드포인트)
 
-화면 JS(`/LSW/js/ls/lsOutPutJoNew.js`, `/LSW/js/admrul/admrulOutPutJoNew.js`)에서 역추적한 경로다. 사이트 개편 시 바뀔 수 있으므로 공식 DRF API를 1순위로, 아래 경로를 대체 수단으로 쓰는 것을 권장한다. [확인] https://www.law.go.kr/LSW/js/ls/lsOutPutJoNew.js · robots.txt는 `Allow: /`이다 [확인] https://www.law.go.kr/robots.txt
+화면 JS(`/LSW/js/ls/lsOutPutJoNew.js`, `/LSW/js/admrul/admrulOutPutJoNew.js`)에서 역추적한 경로입니다. 사이트를 개편하면 바뀔 수 있으므로 공식 DRF API를 1순위로 쓰고, 아래 경로는 대체 수단으로 쓰는 것을 권장합니다. [확인] https://www.law.go.kr/LSW/js/ls/lsOutPutJoNew.js · robots.txt는 `Allow: /`입니다 [확인] https://www.law.go.kr/robots.txt
 
 ```bash
 # 0) 법령명 → 현행 lsiSeq/efYd 해석 (GET 200, iframe src에 들어 있음. HEAD는 404) [확인]
@@ -72,9 +72,9 @@ curl "https://www.ftc.go.kr/www/downloadBbsFile.do?atchmnflNo=14865"   # 여신(
 curl "https://www.ftc.go.kr/www/downloadBbsFile.do?atchmnflNo=14866"   # 예금거래기본약관
 ```
 
-- 법령을 개정하면 lsiSeq가 바뀐다. 그래서 0)단계로 현행 lsiSeq를 다시 해석한 뒤 `manifest.yaml`에 `doc_id, source_url, method, params, format, sha256, retrieved_at, 시행일, 공포번호`를 기록하는 방식을 권장한다. [추정]
-- HWPX는 ZIP 안에 OWPML XML이 든 구조다. `zipfile`로 열어 본문 XML을 파싱하면 HWP 전용 도구 없이 처리할 수 있다. 공정위 파일의 첫 바이트 `PK`는 [확인]했고, 파싱 방법은 [추정]이다.
-- 표준약관 게시판에는 2016-10-21 구판도 남아 있다(제10006호 nttSn=11156, 제10005호 nttSn=11155). "개정 전후 비교 질의" 데모 자료로 쓸 수 있다. [확인] https://www.ftc.go.kr/www/selectBbsNttList.do?bordCd=201&key=202
+- 법령이 개정되면 lsiSeq가 바뀝니다. 그래서 0)단계에서 현행 lsiSeq를 다시 찾은 뒤 `manifest.yaml`에 `doc_id, source_url, method, params, format, sha256, retrieved_at, 시행일, 공포번호`를 기록하는 방식을 권장합니다. [추정]
+- HWPX는 ZIP 안에 OWPML XML이 든 구조입니다. `zipfile`로 열어 본문 XML을 파싱하면 HWP 전용 도구 없이 처리할 수 있습니다. 공정위 파일의 첫 바이트가 `PK`인 것은 [확인]했고, 파싱 방법은 [추정]입니다.
+- 표준약관 게시판에는 2016-10-21 구판도 남아 있습니다(제10006호 nttSn=11156, 제10005호 nttSn=11155). "개정 전후 비교 질의" 데모 자료로 쓸 수 있습니다. [확인] https://www.ftc.go.kr/www/selectBbsNttList.do?bordCd=201&key=202
 
 ---
 
@@ -85,17 +85,17 @@ curl "https://www.ftc.go.kr/www/downloadBbsFile.do?atchmnflNo=14866"   # 예금�
 | 항목 | 내용 | 상태 |
 |---|---|---|
 | 신청 절차 | 회원가입(로그인 ID는 이메일) → 활용할 데이터 선택 후 활용신청(`/LSO/openApi/cuAskList.do`) → 담당자 승인 뒤 사용. "승인 처리는 신청후 1~2일 이내" | [확인] https://open.law.go.kr/LSO/information/guide.do |
-| OC 값 | 가이드 정의는 "신청한 API인증값". 실무상 가입 이메일의 `@` 앞부분이라는 안내가 있다(법제처 계열 다른 서비스 기준). 키 관리 메뉴는 `/LSO/usr/usrOcInfoMod.do` | [확인] https://open.law.go.kr/LSO/openApi/guideResult.do?htmlName=lsNwInfoGuide / [검색] https://opinion.lawmaking.go.kr/api/operationGuideInfo |
-| IP/도메인 | `OC=test`로 부르면 `"사용자 정보 검증에 실패하였습니다." / "…정확한 서버장비의 IP주소 및 도메인주소를 등록해 주세요."` → 신청할 때 호출 서버의 IP와 도메인을 등록해야 한다 | [확인] `curl "https://www.law.go.kr/DRF/lawSearch.do?OC=test&target=law&type=JSON&query=은행법"` |
+| OC 값 | 가이드 정의는 "신청한 API인증값". 실무상 가입 이메일의 `@` 앞부분이라는 안내가 있습니다(법제처 계열 다른 서비스 기준). 키 관리 메뉴는 `/LSO/usr/usrOcInfoMod.do` | [확인] https://open.law.go.kr/LSO/openApi/guideResult.do?htmlName=lsNwInfoGuide / [검색] https://opinion.lawmaking.go.kr/api/operationGuideInfo |
+| IP/도메인 | `OC=test`로 부르면 `"사용자 정보 검증에 실패하였습니다." / "…정확한 서버장비의 IP주소 및 도메인주소를 등록해 주세요."` → 신청할 때 호출 서버의 IP와 도메인을 등록해야 합니다 | [확인] `curl "https://www.law.go.kr/DRF/lawSearch.do?OC=test&target=law&type=JSON&query=은행법"` |
 | 목록 조회 | `https://www.law.go.kr/DRF/lawSearch.do?OC={OC}&target=law&type=JSON&query=은행법` (시행일 기준 목록은 `target=eflaw`) | [확인] https://open.law.go.kr/LSO/openApi/openApiManual.do |
 | 법령 본문 | `http://www.law.go.kr/DRF/lawService.do?OC={OC}&target=law&MST=282001&type=JSON` 또는 `&ID=001549`. 선택 파라미터: `JO`(조번호, 생략 시 전 조문. 6자리 = 조 4자리 + 가지 2자리, 예: 제8조는 `000800`), `LANG=KO/ORI`, `LM`·`LD`·`LN` | [확인] 가이드 / JO 6자리 형식은 [검색] |
 | 본문 응답 필드 | 법령ID, 공포일자, 공포번호, 법령명_한글, 시행일자, 제개정구분, 소관부처명 / 조문번호, 조문가지번호, 조문제목, 조문시행일자, 조문내용 / 항번호·항내용·호번호·호내용·목번호·목내용 / 부칙공포일자·부칙내용 / 별표번호·별표제목·별표내용·별표서식 파일링크 / 개정문내용, 제개정이유내용 | [확인] https://open.law.go.kr/LSO/openApi/guideResult.do?htmlName=lsNwInfoGuide |
 | 행정규칙 본문 | `http://www.law.go.kr/DRF/lawService.do?OC={OC}&target=admrul&ID=2100000282622&type=XML` (ID는 행정규칙 일련번호, LID는 행정규칙ID=21828, LM은 규칙명). 응답: 행정규칙명, 발령일자, 발령번호, 시행일자, 현행여부, 소관부처명, 조문내용, 부칙, 별표서식파일링크, 별표서식PDF파일링크, 첨부파일링크 | [확인] https://open.law.go.kr/LSO/openApi/guideResult.do?htmlName=admrulInfoGuide |
 | 조항호목 단위 | `target=lawjosub` 별도 API | [검색] https://open.law.go.kr/LSO/openApi/guideResult.do?htmlName=lsNwJoListGuide |
-| 별표 파일 | 응답의 별표 링크 값을 `https://www.law.go.kr` 뒤에 붙이면 받을 수 있다. 예: `/LSW/flDownload.do?flSeq=162492787` | [확인] openApiManual.do |
+| 별표 파일 | 응답의 별표 링크 값을 `https://www.law.go.kr` 뒤에 붙이면 받을 수 있습니다. 예: `/LSW/flDownload.do?flSeq=162492787` | [확인] openApiManual.do |
 | 이용 조건 | "제공된 법령정보는 영리 목적의 이용을 포함하여 자유로운 활용이 보장" + 출처 미표기 시 저작권법 제137·138조 형사처벌 가능 경고 | [확인] https://open.law.go.kr/LSO/information/guide.do |
 
-**권장 사용법**: 조문 단위로 청킹하고 정답 조문 메타데이터(`doc_id#제8조`)를 만들 때는 DRF JSON을 쓰고, "실제 PDF/HWPX를 넣는 파서 데모"용으로는 웹 POST 경로를 쓰는 이중 구성이 좋다. [추정]
+**권장 사용법**: 조문 단위로 청킹하고 정답 조문 메타데이터(`doc_id#제8조`)를 만들 때는 DRF JSON을 쓰고, "실제 PDF/HWPX를 넣는 파서 데모"용으로는 웹 POST 경로를 쓰는 이중 구성이 좋습니다. [추정]
 
 ### 2) 금감원 금융상품통합비교공시 (finlife) OpenAPI
 
@@ -110,9 +110,9 @@ curl "https://www.ftc.go.kr/www/downloadBbsFile.do?atchmnflNo=14866"   # 예금�
 | 적금 필드 | 예금 필드 + option `rsrv_type, rsrv_type_nm` (S=정액적립식, F=자유적립식) | [확인] https://finlife.fss.or.kr/finlife/api/fdrmEntyApi/list.do?menuNo=700053 |
 | 주담대 필드 | base: `loan_inci_expn, erly_rpay_fee, dly_rate, loan_lmt` 등 / option: `mrtg_type(_nm), rpay_type(_nm), lend_rate_type(_nm), lend_rate_min, lend_rate_max, lend_rate_avg` | [확인] houseMrtgApi 페이지 |
 | 신용대출 필드 | base: `crdt_prdt_type(_nm), cb_name` / option: `crdt_lend_rate_type(_nm), crdt_grad_1, _4, _5, _6, _10, _11, _12, _13, crdt_grad_avg` | [확인] https://finlife.fss.or.kr/finlife/api/indvlCrdtApi/list.do?menuNo=700057 |
-| **이용약관 주의** | 화면에 "금융상품통합비교공시시스템(금융감독원) 금융회사 상품정보" 출처를 표시해야 한다. 실시간 연계는 허용되지만 **"정보를 복제 또는 저장하거나 전송할 수 없습니다"** → 응답 JSON을 저장소에 커밋하거나 벡터DB에 영구 적재하는 것은 약관 위반 소지가 있다 | [확인] 키 신청 페이지 / 해석은 [추정] |
+| **이용약관 주의** | 화면에 "금융상품통합비교공시시스템(금융감독원) 금융회사 상품정보" 출처를 표시해야 합니다. 실시간 연계는 허용되지만 **"정보를 복제 또는 저장하거나 전송할 수 없습니다"** 조항이 있습니다. 따라서 응답 JSON을 저장소에 커밋하거나 벡터DB에 영구 적재하는 것은 약관 위반 소지가 있습니다 | [확인] 키 신청 페이지 / 해석은 [추정] |
 
-**권장 사용법**: finlife는 "실시간 금리 조회 도구(tool)"로만 에이전트에 붙인다. LangGraph 단계에서 쓰기 좋은 데모다. 가상 상품설명서의 금리와 조건은 실제 분포를 참고하되 가상의 수치로 직접 작성한다. [추정]
+**권장 사용법**: finlife는 "실시간 금리 조회 도구(tool)"로만 에이전트에 붙입니다. LangGraph 단계에서 쓰기 좋은 데모입니다. 가상 상품설명서의 금리와 조건은 실제 분포를 참고하되, 수치는 가상으로 직접 작성합니다. [추정]
 
 ---
 
@@ -120,19 +120,19 @@ curl "https://www.ftc.go.kr/www/downloadBbsFile.do?atchmnflNo=14866"   # 예금�
 
 **근거 조문 (현행 저작권법 [시행 2026.10.29.] [법률 제21595호])** [확인] https://www.law.go.kr/LSW/lsInfoR.do?lsiSeq=285693&chrClsCd=010202&efYd=20261029&ancYnChk=0
 - 제7조(보호받지 못하는 저작물): 1. 헌법·법률·조약·명령·조례 및 규칙, 2. 국가 또는 지방자치단체의 고시·공고·훈령 그 밖에 이와 유사한 것, 3. 판결·결정 등, 4. 국가 또는 지자체가 작성한 제1~3호의 편집물 또는 번역물, 5. 시사보도.
-- 제24조의2(공공저작물의 자유이용): 국가나 지자체가 업무상 작성해 공표한 저작물이나 저작재산권 전부를 보유한 저작물은 허락 없이 이용할 수 있다(예외 4가지).
-- 제35조의5(공정한 이용): 4요소로 판단한다. 현행 본문에서 "정보분석" 같은 TDM 면책 조항은 찾지 못했다(검색 기준). [확인/추정]
+- 제24조의2(공공저작물의 자유이용): 국가나 지자체가 업무상 작성해 공표한 저작물이나 저작재산권 전부를 보유한 저작물은 허락 없이 이용할 수 있습니다. 예외는 4가지입니다.
+- 제35조의5(공정한 이용): 4가지 요소로 판단합니다. 현행 본문에서 "정보분석" 같은 TDM 면책 조항은 찾지 못했습니다(검색 기준). [확인/추정]
 
 | 자료 | 판단 | 권고 |
 |---|---|---|
-| 법령 3종 | 제7조 제1호로 비보호. 법제처는 "영리 목적의 이용을 포함하여 자유로운 활용이 보장"한다고 밝히며 출처 표기를 요구한다. law.go.kr이 만든 PDF/HWP 편집본도 제4호(국가 작성 편집물) 범위로 볼 수 있다 [확인 https://open.law.go.kr/LSO/information/guide.do / 제4호 적용은 추정] | **커밋 가능.** 다만 최신성 때문에 스크립트로 받는 쪽을 기본으로 하고, 정규화한 텍스트·JSON과 `출처: 국가법령정보센터(법제처), 시행일, 공포번호`를 함께 커밋한다 |
-| 전자금융감독규정 | 금융위원회 고시이므로 제7조 제2호로 비보호 [확인(조문)/적용은 추정] | 법령과 같이 처리 |
-| 공정위 표준약관 | 약관규제법 제19조의3상 표준약관은 사업자·사업자단체가 마련해 심사청구하거나 공정위가 직접 제정하고, 공정위가 "공시"하고 사용을 권장한다 [확인 https://www.law.go.kr/LSW/lsInfoR.do?lsiSeq=260021&chrClsCd=010202&efYd=20240807&ancYnChk=0]. 이것이 제7조 제2호의 "고시…그 밖에 이와 유사한 것"에 해당한다는 명시적 해석은 찾지 못했다 [추정]. 공정위 저작권정책은 공정위가 권리 전부를 가진 저작물은 제24조의2로 자유이용할 수 있다고 하면서도, **공공누리가 부착되지 않은 자료는 사전 협의**를 요구한다. 해당 게시물에서는 공공누리 표시를 찾지 못했다 [확인 https://www.ftc.go.kr/www/contents.do?key=520]. 은행 표준약관 초안의 작성 주체(은행연합회 등)는 확인하지 못했다 [미확인] | **원문 커밋은 피하고 다운로드 스크립트(URL + SHA256)를 쓴다.** README에 출처와 개정일을 적는다. 커밋하려면 공정위 담당과(소비자거래정책과)에 확인하는 것이 안전하다. 실제 위험은 낮지만 포트폴리오에서는 보수적으로 가는 것을 권장한다 [추정] |
-| 은행 상품설명서 | 법인 명의로 공표된 업무상저작물(제9조)이므로 보호 대상이다. 제7조·제24조의2는 해당하지 않는다. 금리 같은 사실은 보호되지 않지만 문서 표현은 보호된다. 국방부 사이트에 게시돼 있어도 권리가 바뀌지 않는다 [추정]. 참고로 KB경영연구소는 "비영리 목적만, 사전 협의"를 요구한다 [검색 https://kbfg.com/kbresearch/about/policy.do] | **커밋 금지.** ① 데모 기본값은 가상 은행 설명서 3종(직접 작성, 실존 은행명·로고 미사용). ② 실물 테스트는 `scripts/fetch_real_samples.py`로 로컬에만 받고 `.gitignore`에 `data/raw/` 추가. 평가 결과에는 문서 일부 인용만 남긴다 |
+| 법령 3종 | 제7조 제1호에 따라 보호받지 않습니다. 법제처는 "영리 목적의 이용을 포함하여 자유로운 활용이 보장"한다고 밝히며 출처 표기를 요구합니다. law.go.kr이 만든 PDF/HWP 편집본도 제4호(국가 작성 편집물) 범위로 볼 수 있습니다 [확인 https://open.law.go.kr/LSO/information/guide.do / 제4호 적용은 추정] | **커밋 가능.** 다만 최신성 때문에 스크립트로 받는 쪽을 기본으로 하고, 정규화한 텍스트·JSON과 `출처: 국가법령정보센터(법제처), 시행일, 공포번호`를 함께 커밋합니다 |
+| 전자금융감독규정 | 금융위원회 고시이므로 제7조 제2호에 따라 보호받지 않습니다 [확인(조문)/적용은 추정] | 법령과 같이 처리합니다 |
+| 공정위 표준약관 | 약관규제법 제19조의3에 따르면 표준약관은 사업자·사업자단체가 마련해 심사청구하거나 공정위가 직접 제정하고, 공정위가 "공시"하고 사용을 권장합니다 [확인 https://www.law.go.kr/LSW/lsInfoR.do?lsiSeq=260021&chrClsCd=010202&efYd=20240807&ancYnChk=0]. 이것이 제7조 제2호의 "고시…그 밖에 이와 유사한 것"에 해당한다는 명시적 해석은 찾지 못했습니다 [추정]. 공정위 저작권정책은 공정위가 권리 전부를 가진 저작물은 제24조의2로 자유이용할 수 있다고 하면서도, **공공누리가 부착되지 않은 자료는 사전 협의**를 요구합니다. 해당 게시물에서는 공공누리 표시를 찾지 못했습니다 [확인 https://www.ftc.go.kr/www/contents.do?key=520]. 은행 표준약관 초안의 작성 주체(은행연합회 등)는 확인하지 못했습니다 [미확인] | **원문 커밋은 피하고 다운로드 스크립트(URL + SHA256)를 씁니다.** README에 출처와 개정일을 적습니다. 커밋하려면 공정위 담당과(소비자거래정책과)에 확인하는 것이 안전합니다. 실제 위험은 낮지만 포트폴리오에서는 보수적으로 가는 것을 권장합니다 [추정] |
+| 은행 상품설명서 | 법인 명의로 공표된 업무상저작물(제9조)이므로 보호 대상입니다. 제7조·제24조의2는 해당하지 않습니다. 금리 같은 사실은 보호되지 않지만 문서 표현은 보호됩니다. 국방부 사이트에 게시돼 있어도 권리는 바뀌지 않습니다 [추정]. 참고로 KB경영연구소는 "비영리 목적만, 사전 협의"를 요구합니다 [검색 https://kbfg.com/kbresearch/about/policy.do] | **커밋 금지.** ① 데모 기본값은 가상 은행 설명서 3종입니다. 직접 작성하고, 실존 은행명·로고는 쓰지 않습니다. ② 실물 테스트용 문서는 `scripts/fetch_real_samples.py`로 로컬에만 받고, `.gitignore`에 `data/raw/`를 추가합니다. 평가 결과에는 문서 일부 인용만 남깁니다 |
 | finlife 응답 데이터 | 약관상 복제·저장·전송 금지 [확인] | 커밋 금지. 실시간 조회 도구로만 사용 |
-| 가상 내규·가상 설명서 | 자체 저작물 | 커밋한다(CC BY 4.0 권장). 문서마다 "가상 문서, 실존 기관과 무관" 문구를 넣는다 |
+| 가상 내규·가상 설명서 | 자체 저작물 | 커밋합니다(CC BY 4.0 권장). 문서마다 "가상 문서, 실존 기관과 무관" 문구를 넣습니다 |
 
-선례: allganize와 KorFinVDR도 **원문은 배포하지 않고 URL과 메타데이터만** 공개한다. KorFinVDR은 "한국은행 저작권 정책상 페이지 이미지 재배포 불가"를 명시한다. 같은 패턴을 쓰면 면접에서 설명하기도 좋다. [확인 https://huggingface.co/datasets/MarkrAI/korfinvdr-financial_report]
+선례도 있습니다. allganize와 KorFinVDR도 **원문은 배포하지 않고 URL과 메타데이터만** 공개합니다. KorFinVDR은 "한국은행 저작권 정책상 페이지 이미지 재배포 불가"라고 명시합니다. 같은 방식을 쓰면 면접에서 설명하기도 좋습니다. [확인 https://huggingface.co/datasets/MarkrAI/korfinvdr-financial_report]
 
 ---
 
@@ -140,12 +140,12 @@ curl "https://www.ftc.go.kr/www/downloadBbsFile.do?atchmnflNo=14866"   # 예금�
 
 ### allganize/RAG-Evaluation-Dataset-KO (주 벤치마크)
 - 경로: https://huggingface.co/datasets/allganize/RAG-Evaluation-Dataset-KO · 라이선스 **MIT** · lastModified 2024-11-22 · gated 아님 [확인 https://huggingface.co/api/datasets/allganize/RAG-Evaluation-Dataset-KO]
-- 파일: `README.md`(11.4kB), `documents.csv`(12.6kB), `rag_evaluation_result.csv`(5.69MB). 뷰어는 default/test 300행이다. [확인]
-- `rag_evaluation_result.csv`: 300행 × 52열. 기본 열은 `domain, question, target_answer, target_file_name, target_page_no, context_type`이고, 23개 시스템마다 `*_answer`·`*_ox` 열이 있다. 도메인별 60문항 × 5 도메인(finance, public, medical, law, commerce). `context_type` 분포는 paragraph 148 / image 57 / table 50 / text 45. [확인]
-- 원문 PDF 제공 방식: 저장소에는 PDF가 없다. `documents.csv`(열: `domain, file_name, pages, url`, 64행. medical 20, public 12, law 12, finance 10, commerce 10)의 출처 페이지 URL에서 직접 받아야 한다. finance 출처는 한국은행·금융투자협회·금융위 보도자료·한국금융연구원이다. 일부 URL은 게시판 목록 페이지라 링크가 깨질 수 있다. README 표에는 commerce가 9문서로 적혀 있지만 CSV에는 10행이 있다. [확인] MIT는 QA에 적용되고 원문 PDF의 저작권은 각 기관에 있다. [추정]
-- finance 문항 예: "시중은행, 지방은행, 인터넷은행의 인가 요건 및 절차…"(정답이 은행법 제8조를 언급)라서 이 프로젝트와 관련도가 높다. [확인]
-- 2024년 리더보드 최상위는 Alli(claude3.5-sonnet) 0.847(254/300)이다. 자동평가는 LLM 4개 투표 방식이고 사람 채점 대비 오차는 약 8%다(2024.08 기준). [확인 README]
-- 활용: finance 60문항과 PDF 10개로 "외부 일반화" 점수를 내고, 가상 은행 워크스페이스용 골든셋은 별도로 직접 만든다. [추정]
+- 파일: `README.md`(11.4kB), `documents.csv`(12.6kB), `rag_evaluation_result.csv`(5.69MB). 뷰어는 default/test 300행입니다. [확인]
+- `rag_evaluation_result.csv`: 300행 × 52열입니다. 기본 열은 `domain, question, target_answer, target_file_name, target_page_no, context_type`이고, 23개 시스템마다 `*_answer`·`*_ox` 열이 있습니다. 도메인마다 60문항씩 5개 도메인(finance, public, medical, law, commerce)입니다. `context_type` 분포는 paragraph 148 / image 57 / table 50 / text 45입니다. [확인]
+- 원문 PDF 제공 방식: 저장소에는 PDF가 없고, `documents.csv`에 적힌 출처 페이지 URL에서 직접 받아야 합니다. 이 파일은 열이 `domain, file_name, pages, url`이고 64행입니다(medical 20, public 12, law 12, finance 10, commerce 10). finance 출처는 한국은행·금융투자협회·금융위 보도자료·한국금융연구원입니다. 일부 URL은 게시판 목록 페이지라 링크가 깨질 수 있습니다. README 표에는 commerce가 9문서로 적혀 있지만 CSV에는 10행이 있습니다. [확인] MIT는 QA에 적용되고 원문 PDF의 저작권은 각 기관에 있습니다. [추정]
+- finance 문항 예로 "시중은행, 지방은행, 인터넷은행의 인가 요건 및 절차…"가 있습니다. 정답이 은행법 제8조를 언급하므로 이 프로젝트와 관련도가 높습니다. [확인]
+- 2024년 리더보드 최상위는 Alli(claude3.5-sonnet) 0.847(254/300)입니다. 자동평가는 LLM 4개가 투표하는 방식이고, 사람 채점과 비교한 오차는 약 8%입니다(2024.08 기준). [확인 README]
+- 활용: finance 60문항과 PDF 10개로 "외부 일반화" 점수를 내고, 가상 은행 워크스페이스용 골든셋은 따로 직접 만듭니다. [추정]
 
 ### 그 외 후보
 
@@ -158,7 +158,7 @@ curl "https://www.ftc.go.kr/www/downloadBbsFile.do?atchmnflNo=14866"   # 예금�
 | KorFinVDR (`MarkrAI/korfinvdr-*`, 2026) | 금융 시각문서 검색. 5개 서브셋, 약 18,393쪽, 약 2,423 쿼리. 원문 페이지 이미지는 미배포 | 어노테이션 CC BY 4.0, GitHub MIT | 표·차트가 많은 PDF 검색 평가(확장용) | [확인] https://github.com/Marker-Inc-Korea/kor-fin-vdr |
 | (주의) AI Hub "금융, 법률 문서 기계독해 데이터" (dataSetSn=71610) | 2022년 구축, 라벨 401,108건, 원천은 한국은행·금융위·금감원·법제처 등 | 내국인만·로그인·승인 필요. AI Hub 정책상 승인 없는 제3자 제공 금지, "학습용으로만" | 로컬 학습·실험만. 저장소 커밋 불가. HF의 `shchoice/finance-legal-mrc`는 같은 명칭과 5개 서브셋을 자체 표기한 CC-BY-SA로 올린 재업로드로 보여 사용 비권장 [추정] | [확인] https://www.aihub.or.kr/aihubdata/data/view.do?dataSetSn=71610 · https://www.aihub.or.kr/intrcn/guid/usagepolicy.do?currMenu=151&topMenu=105 |
 
-참고: `BCCard/BCCard-Finance-Kor-QnA`(apache-2.0, jsonl 17.1MB)와 `allganize/financial-mmlu-ko`(455문항, 라이선스 표기 없음)도 있다. 앞의 것은 생성형 QA 학습용, 뒤의 것은 객관식이라 RAG 평가에는 덜 적합하다. [확인 HF API]
+이 밖에 `BCCard/BCCard-Finance-Kor-QnA`(apache-2.0, jsonl 17.1MB)와 `allganize/financial-mmlu-ko`(455문항, 라이선스 표기 없음)도 있습니다. 앞의 것은 생성형 QA 학습용이고 뒤의 것은 객관식이라 RAG 평가에는 덜 적합합니다. [확인 HF API]
 
 ---
 
@@ -212,4 +212,4 @@ curl "https://www.ftc.go.kr/www/downloadBbsFile.do?atchmnflNo=14866"   # 예금�
   - HF 재업로드본: https://huggingface.co/datasets/shchoice/finance-legal-mrc
   - financial-mmlu-ko: https://huggingface.co/datasets/allganize/financial-mmlu-ko
 
-(프로젝트 파일은 만들거나 수정하지 않았다. 확인 과정에서 받은 HTML·JS 임시 파일만 <임시 폴더> 아래에 남아 있다.)
+이 조사에서는 프로젝트 파일을 만들거나 수정하지 않았습니다. 확인 과정에서 받은 HTML·JS 임시 파일만 <임시 폴더> 아래에 남아 있습니다.

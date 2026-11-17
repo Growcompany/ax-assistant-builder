@@ -3,8 +3,8 @@
 [확인] 1차 출처 · [2차] 블로그/벤더 · [판단] 추론
 
 ## 0. 핵심
-- 차별화는 기능 개수가 아니라 **같은 질문셋으로 검색 방식을 비교하고 수치로 보여주는 것**.
-- 국내 지원이면 **한국어 처리 근거**(형태소 BM25, 한국어 임베딩 비교, HWPX·표 파싱)가 강한 차별점. [판단]
+- 차별화는 기능 개수가 아니라 **같은 질문셋으로 검색 방식을 비교하고 수치로 보여주는 것**에서 나옵니다.
+- 국내 회사에 지원한다면 **한국어 처리 근거**(형태소 BM25, 한국어 임베딩 비교, HWPX·표 파싱)가 강한 차별점이 됩니다. [판단]
 
 ## 1. "PDF 챗봇"을 넘는 차별화 요소
 
@@ -22,11 +22,11 @@
 
 - **임베딩** [확인] https://github.com/OnAnd0n/ko-embedding-leaderboard (2026-07, NDCG 평균)
   - pplx-embed-v1-4b 82.79 › dragonkue/snowflake-arctic-embed-l-v2.0-ko 82.14 › PIXIE-Rune 81.57 › Qwen3-Embedding-4B 81.37 › KURE-v1 80.76 › bge-m3 79.30
-  - 상용 API는 직접 비교 필요 → 그 비교 자체가 좋은 실험 소재
+  - 상용 API는 직접 비교해야 하고, 그 비교 자체가 좋은 실험 소재가 됩니다.
 - **리랭커**: dragonkue/bge-reranker-v2-m3-ko (모델카드 자체 보고 F1 0.912) [2차]
-- **Kiwi BM25**: 공백 토큰화로는 복합어 검색 실패 → 색인·질의 모두 형태소 토큰화, 도메인 용어는 사용자 사전, **점수 합산 말고 RRF로 결합** [확인] https://wikidocs.net/231609
-  - Qdrant는 dense+sparse+RRF 네이티브 지원 [확인]. 한국어는 Kiwi 토큰으로 sparse 벡터 직접 생성 권장 [판단]
-- **HWP/HWPX**: 2026-05-18부터 온나라시스템 hwp 첨부 제한, hwpx 전환 [확인, 언론]. python-hwpx(HWPX), pyhwp(HWP5, AGPL)
+- **Kiwi BM25**: 공백으로 토큰화하면 복합어 검색이 실패합니다. 색인과 질의 모두 형태소로 토큰화하고, 도메인 용어는 사용자 사전으로 처리하고, **점수를 더하지 말고 RRF로 결합**합니다. [확인] https://wikidocs.net/231609
+  - Qdrant는 dense+sparse+RRF를 기본 기능으로 지원합니다 [확인]. 한국어는 Kiwi 토큰으로 sparse 벡터를 직접 만드는 편이 좋습니다 [판단].
+- **HWP/HWPX**: 2026-05-18부터 온나라시스템은 hwp 첨부를 제한하고 hwpx로 전환했습니다 [확인, 언론]. 파서는 python-hwpx(HWPX), pyhwp(HWP5, AGPL)가 있습니다.
 - **PDF 표**: OpenDataLoader PDF(한컴, Apache-2.0, bbox 제공 → 인용에 유리) [2차], Docling(기본 OCR에 한글 없음) [2차], Upstage Document Parse(API)
 - **평가 데이터**: `allganize/RAG-Evaluation-Dataset-KO` — 300문항, **금융·공공·의료·법률·커머스**, 근거 유형(문단·표·이미지) 라벨, MIT [확인] https://huggingface.co/datasets/allganize/RAG-Evaluation-Dataset-KO
   - 파이프라인 자동 최적화: AutoRAG https://github.com/Marker-Inc-Korea/AutoRAG
@@ -51,4 +51,4 @@
 5. 결과 표 (정량 지표 2개 이상)
 6. 원커맨드 셋업 (`docker compose up`)
 7. 한계와 개선 방향 ("가장 과소평가된 섹션")
-- 추가: 평가 실행마다 프롬프트·모델 버전·지연·비용 기록, 실패 사례 갤러리, `eval/` 폴더 + CI 배지
+- 그 밖에 평가를 실행할 때마다 프롬프트·모델 버전·지연·비용을 기록하고, 실패 사례 갤러리, `eval/` 폴더와 CI 배지를 더하면 좋습니다.
