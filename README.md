@@ -232,7 +232,7 @@ flowchart TD
         Q --> ACL["권한 필터<br/>볼 수 있는 등급만"]
         ACL --> BM["BM25 검색"]
         ACL --> DN["dense 검색"]
-        BM --> RRF["RRF로 순위 합치기"]
+        BM --> RRF["RRF로 합치기"]
         DN --> RRF
         RRF --> RR["리랭커 (선택)"]
         RR --> GEN["근거 5개로 답변<br/>Ollama 기본"]
